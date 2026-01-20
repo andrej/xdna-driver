@@ -166,7 +166,6 @@ xdna_hwctx(const device_xdna* dev, const xrt::xclbin& xclbin, const xrt::hw_cont
     }
     throw;
   }
-
   std::stringstream ss;
   ss << "Partition Created with start_col "<<m_info.start_column
           <<" num_columns "<<m_info.num_columns
@@ -437,6 +436,21 @@ init_qos_info(const qos_type& qos)
 
   if (m_qos.user_start_col != USER_START_COL_NOT_REQUESTED) {
     shim_debug("QoS user_start_col requested: %u", m_qos.user_start_col);
+    auto total_cols = xrt_core::device_query<xrt_core::query::total_cols>(m_device);
+
+    if (m_qos.user_start_col % MIN_COL_SUPPORT != 0) {
+      throw xrt_core::system_error(EINVAL,
+        "Invalid start_col " + std::to_string(m_qos.user_start_col) +
+        ": must be a multiple of " + std::to_string(MIN_COL_SUPPORT) +
+        " (valid values: 0, 4, 8, ...)");
+    }
+
+    if (m_qos.user_start_col >= total_cols) {
+      throw xrt_core::system_error(ERANGE,
+        "Invalid start_col " + std::to_string(m_qos.user_start_col) +
+        ": exceeds maximum columns available on device (" +
+        std::to_string(total_cols) + ")");
+    }
   }
 
   return 0;
