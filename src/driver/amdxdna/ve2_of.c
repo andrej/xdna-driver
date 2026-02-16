@@ -198,6 +198,7 @@ static struct device_node *ve2_find_mem_topology_node(struct device_node *aie_np
  * Finds the aie_mem_topology node by compatible. Search starts from the
  * AI engine node's parent so the topology node is expected as a sibling.
  * Build phandle -> CMA index map from AI engine node's memory-region.
+
  * Each child defines columns = <start end> and one or more memory-region
  * phandles; phandles are resolved to CMA indices and stored as a bitmap.
  * Topology is stored as regions[0..num_regions-1], cap MAX_MEM_REGIONS.

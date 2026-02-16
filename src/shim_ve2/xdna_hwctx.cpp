@@ -394,7 +394,6 @@ alloc_bo(void* userptr, size_t size, uint64_t flags)
 
   /* Inject hwctx mem_bitmap (queried from driver) into BO flags. */
   return dev->alloc_bo(userptr, get_slotidx(), size, flags, m_mem_bitmap);
-
 }
 
 std::unique_ptr<xrt_core::buffer_handle>

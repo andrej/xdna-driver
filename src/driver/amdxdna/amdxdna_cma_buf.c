@@ -140,6 +140,10 @@ static int amdxdna_cmabuf_mmap(struct dma_buf *dbuf, struct vm_area_struct *vma)
 						cmabuf->dma_addr,
 						cmabuf->size);
 	}
+		ret = dma_mmap_coherent(cmabuf->dev, vma,
+					cmabuf->cpu_addr,
+					cmabuf->dma_addr,
+					cmabuf->size);
 
 	vma->vm_pgoff = vm_pgoff;
 

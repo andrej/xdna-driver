@@ -404,6 +404,8 @@ static inline void hsa_queue_pkt_set_invalid(struct host_queue_packet *pkt)
 static void ve2_free_hsa_queue(struct amdxdna_dev *xdna, struct ve2_hsa_queue *queue)
 {
 	if (queue->hsa_queue_p) {
+		XDNA_DBG(xdna, "Freeing host queue: dma_addr=0x%llx",
+			 queue->hsa_queue_mem.dma_addr);
 		dma_free_coherent(queue->alloc_dev,
 				  sizeof(struct hsa_queue) + sizeof(u64) * HOST_QUEUE_ENTRY,
 				  queue->hsa_queue_p,
@@ -1514,7 +1516,6 @@ int ve2_hwctx_init(struct amdxdna_ctx *hwctx)
 				  client->pid, 0, priv->id, 0);
 	XDNA_DBG(xdna, "hwctx init: enter hwctx=%p pid=%d", hwctx, client->pid);
 	init_waitqueue_head(&priv->waitq);
-
 	ret = ve2_xrs_request(xdna, hwctx);
 	if (ret) {
 		XDNA_ERR(xdna, "XRS resource request failed, ret=%d", ret);
