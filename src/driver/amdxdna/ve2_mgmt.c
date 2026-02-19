@@ -904,6 +904,8 @@ static void ve2_dump_debug_state(struct amdxdna_dev *xdna,
 	/* Dump packet info for pending slots */
 	XDNA_WARN(xdna, "HSA Queue Packet Details:\n");
 	for (i = 0; i < HOST_QUEUE_ENTRY; i++) {
+		/* Sync completion memory before reading (device may have written) */
+		hsa_queue_sync_completion_for_read(hq, i);
 		struct host_queue_packet *pkt = &queue->hq_entry[i];
 		u64 completion = hq->hq_complete.hqc_mem[i];
 		u64 expected_signal = hq->hq_complete.hqc_dma_addr + i * sizeof(u64);

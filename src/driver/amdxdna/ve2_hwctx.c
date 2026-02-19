@@ -587,7 +587,6 @@ static int ve2_create_host_queue(struct amdxdna_dev *xdna, struct amdxdna_ctx *h
 				   queue->hsa_queue_mem.dma_addr,
 				   sizeof(struct hsa_queue),
 				   DMA_TO_DEVICE);
-
 	XDNA_DBG(xdna, "Created host queue: dma_addr=0x%llx, capacity=%d, data_addr=0x%llx",
 		 queue->hsa_queue_mem.dma_addr, nslots,
 		 queue->hsa_queue_p->hq_header.data_address);
@@ -678,7 +677,7 @@ static int submit_command_indirect(struct amdxdna_ctx *hwctx, void *cmd_data, u6
 		cebp->payload.args_host_addr_low = 0;
 		cebp->payload.args_host_addr_high = 0;
 		/* Sync indirect packet after writing (device will read) */
-		hsa_queue_sync_indirect_pkt_for_write(hq_queue, uc, slot_id);
+		hsa_queue_sync_indirect_pkt_for_write(hq_queue, dpu->uc_index, slot_id);
 	}
 
 	/* Sync packet after writing (device will read) */
@@ -1102,79 +1101,8 @@ static inline bool check_read_index(struct amdxdna_ctx *hwctx,
 		XDNA_DBG(xdna, "read index address: 0x%llx", (u64)read_index);
 		XDNA_DBG(xdna, "hwctx [%p] check read idx (%llu) > cmd idx (%llu)",
 			 hwctx, read_index_value, seq);
-	}
 
-	counter++;
-	if (read_index_value > seq) {
-		struct amdxdna_dev *xdna = hwctx->client->xdna;
-
-		trace_amdxdna_trace_point("XRT_PROFILING_TRACE_UPDATE_READ_INDEX",
-					  hwctx->client->pid, hwctx->priv->id, seq,
-					  read_index_value);
-
-		XDNA_DBG(xdna,
-			 "HSA queue read_index past seq: seq=%llu read_index=%llu hwctx=%p pid=%d",
-			 (u64)seq, read_index_value, hwctx, hwctx->client->pid);
-
-		return true;
-	}
-
-	return false;
-}
-
-/*
- * Fill health data directly into the command BO buffer.  Writing straight
- * to cmd_data avoids the flexible-array-member overflow that occurred when
- * the old code wrote through the zero-length uc_info[] embedded inside
- * hwctx->health_data.
- */
-static void ve2_fill_health_data(struct amdxdna_dev *xdna,
-				 struct amdxdna_ctx *hwctx,
-				 void *cmd_data, u32 data_total)
-{
-	struct amdxdna_ctx_priv *priv_ctx = hwctx->priv;
-	struct device *aie_dev = priv_ctx->aie_dev;
-	struct amdxdna_ctx_health_data *health;
-	size_t hdr_size = offsetof(struct amdxdna_ctx_health_data, aie4.uc_info);
-	struct handshake *hs;
-	u32 max_uc;
-	u32 num_uc;
-	int ret;
-
-	if (!cmd_data || data_total < hdr_size) {
-		XDNA_WARN(xdna, "Health data buffer too small: %u < %zu",
-			  data_total, hdr_size);
-		return;
-	}
-
-	memset(cmd_data, 0, data_total);
-	health = (struct amdxdna_ctx_health_data *)cmd_data;
-	health->version = AMDXDNA_CTX_HEALTH_DATA_V1;
-	health->npu_gen = AMDXDNA_NPU_GEN_AIE4;
-	health->aie4.ctx_state = priv_ctx->state;
-	health->aie4.ctx_error_type = 0;
-
-	max_uc = (data_total - hdr_size) / sizeof(struct uc_health_info);
-	num_uc = min(priv_ctx->num_col, max_uc);
-
-	for (u32 col = 0; col < num_uc; col++) {
-		hs = kzalloc(sizeof(*hs), GFP_KERNEL);
-		if (!hs) {
-			XDNA_ERR(xdna, "No memory for handshake\n");
-			return;
-		}
-
-		ret = ve2_partition_read_privileged_mem(aie_dev, col,
-							offsetof(struct handshake,
-								 mpaie_alive),
-							sizeof(struct handshake),
-							(void *)hs);
-		if (ret < 0) {
-			XDNA_ERR(xdna, "aie_partition_read failed col %u ret=%d\n", col, ret);
-			kfree(hs);
-			return;
-		}
-
+				ve2_process_hqc_completion(xdna, hwctx, job, seq);
 		health->aie4.uc_info[col].uc_idx = hwctx->start_col + col;
 		health->aie4.uc_info[col].uc_idle_status = hs->cert_idle_status;
 		health->aie4.uc_info[col].misc_status = hs->misc_status;
