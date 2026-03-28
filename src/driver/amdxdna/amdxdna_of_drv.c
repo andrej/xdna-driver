@@ -10,6 +10,7 @@
 
 #include "amdxdna_devel.h"
 #include "amdxdna_of_drv.h"
+#include "amdxdna_sysfs.h"
 
 static const struct of_device_id amdxdna_of_table[] = {
 	{ .compatible = "amdxdna,ve2", .data = &dev_ve2_info },
@@ -42,6 +43,8 @@ static int amdxdna_of_probe(struct platform_device *pdev)
 
 	drmm_mutex_init(&xdna->ddev, &xdna->dev_lock);
 	INIT_LIST_HEAD(&xdna->client_list);
+	INIT_LIST_HEAD(&xdna->detached_forever_ctxs);
+	mutex_init(&xdna->detached_lock);
 	platform_set_drvdata(pdev, xdna);
 
 	if (!xdna->dev_info->ops->init || !xdna->dev_info->ops->fini)
@@ -58,16 +61,22 @@ static int amdxdna_of_probe(struct platform_device *pdev)
 	/* Set vbnv to default - OF devices don't query revision from firmware */
 	xdna->vbnv = xdna->dev_info->default_vbnv;
 
+	ret = amdxdna_sysfs_init(xdna);
+	if (ret) {
+		XDNA_ERR(xdna, "Create amdxdna sysfs attrs failed: %d", ret);
+		goto failed_dev_fini;
+	}
+
 	ret = drm_dev_register(&xdna->ddev, 0);
 	if (ret) {
 		XDNA_ERR(xdna, "DRM register failed, ret %d", ret);
-		return ret;
+		goto failed_sysfs_fini;
 	}
 
 	if (!xdna->dev_handle) {
 		XDNA_ERR(xdna, "amdxdna device handle is null");
 		ret = -EINVAL;
-		goto out;
+		goto failed_drm_unreg;
 	}
 
 	ret = dma_set_mask_and_coherent(&pdev->dev, DMA_BIT_MASK(64));
@@ -75,7 +84,7 @@ static int amdxdna_of_probe(struct platform_device *pdev)
 		ret = dma_set_mask_and_coherent(&pdev->dev, DMA_BIT_MASK(32));
 		if (ret) {
 			XDNA_ERR(xdna, "DMA configuration failed: 0x%x\n", ret);
-			goto out;
+			goto failed_drm_unreg;
 		}
 
 		XDNA_WARN(xdna, "DMA configuration downgraded to 32bit Mask\n");
@@ -89,16 +98,49 @@ static int amdxdna_of_probe(struct platform_device *pdev)
 	XDNA_DBG(xdna, "pdev %p", pdev);
 
 	return 0;
-out:
+
+failed_drm_unreg:
 	drm_dev_put(&xdna->ddev);
+failed_sysfs_fini:
+	amdxdna_sysfs_fini(xdna);
+failed_dev_fini:
+	mutex_lock(&xdna->dev_lock);
+	xdna->dev_info->ops->fini(xdna);
+	mutex_unlock(&xdna->dev_lock);
 	return ret;
 }
 
 static void amdxdna_of_remove(struct platform_device *pdev)
 {
 	struct amdxdna_dev *xdna = platform_get_drvdata(pdev);
+	struct amdxdna_ctx *ctx;
 
 	drm_dev_unplug(&xdna->ddev);
+
+	/* Force-stop and reclaim any detached forever mode contexts */
+	mutex_lock(&xdna->detached_lock);
+	while (!list_empty(&xdna->detached_forever_ctxs)) {
+		ctx = list_first_entry(&xdna->detached_forever_ctxs,
+				       struct amdxdna_ctx, detached_list_node);
+
+		XDNA_WARN(xdna,
+			  "Driver unload: force-stopping detached forever context %s (ctx_id=%u)",
+			  ctx->name, ctx->id);
+
+		/* Stop forever mode - this polls until firmware stops */
+		ve2_hwctx_forever_stop(ctx);
+
+		/* Reclaim all resources (removes from list) */
+		ve2_hwctx_reclaim_detached(xdna, ctx);
+
+		/* Free the context structure itself */
+		kfree(ctx->name);
+		kfree(ctx);
+	}
+	mutex_unlock(&xdna->detached_lock);
+	mutex_destroy(&xdna->detached_lock);
+
+	amdxdna_sysfs_fini(xdna);
 
 	mutex_lock(&xdna->dev_lock);
 	xdna->dev_info->ops->fini(xdna);

@@ -234,6 +234,9 @@ struct amdxdna_ctx {
 	struct list_head		parts_work_entry;
 	struct work_struct		dispatch_work;
 	struct work_struct		yield_work;
+
+	/* Forever mode detached list */
+	struct list_head		detached_list_node;
 };
 
 #define drm_job_to_xdna_job(j) \

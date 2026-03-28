@@ -32,6 +32,30 @@ int xrs_get_total_cols(struct solver_state *xrs)
 	return xrs->cfg.total_col;
 }
 
+/**
+ * xrs_set_partition_exclusive - Toggle exclusive flag on a partition
+ * @hdl: XRS handle
+ * @rid: Request ID (context pointer)
+ * @exclusive: true to mark exclusive (blocks new contexts), false to allow sharing
+ *
+ * Returns: 0 on success, -ENODEV if context not found
+ */
+int xrs_set_partition_exclusive(void *hdl, u64 rid, bool exclusive)
+{
+	struct solver_state *xrs = hdl;
+	struct solver_node *node;
+
+	node = rg_search_node(&xrs->rgp, rid);
+	if (!node || !node->pt_node)
+		return -ENODEV;
+
+	node->pt_node->exclusive = exclusive;
+	drm_dbg(xrs->cfg.ddev, "Set exclusive=%d for partition start_col=%u\n",
+		exclusive, node->pt_node->start_col);
+
+	return 0;
+}
+
 struct solver_node *rg_search_node(struct solver_rgroup *rgp, u64 rid)
 {
 	struct solver_node *node;

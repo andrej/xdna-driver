@@ -80,6 +80,12 @@ static int ve2_load_fw(struct amdxdna_dev_hdl *xdna_hdl)
 	XDNA_INFO(xdna, "CERT git hash: %s\n", xdna_hdl->fw_version.git_hash);
 	XDNA_INFO(xdna, "CERT git hash date: %s\n", xdna_hdl->fw_version.date);
 
+	/* Populate common fw_ver structure for sysfs compatibility */
+	xdna->fw_ver.major = xdna_hdl->fw_version.major;
+	xdna->fw_ver.minor = xdna_hdl->fw_version.minor;
+	xdna->fw_ver.sub = 0;   /* VE2/CERT doesn't have sub version */
+	xdna->fw_ver.build = 0; /* VE2/CERT doesn't have build number */
+
 teardown:
 	aie_partition_teardown(xaie_dev);
 release:

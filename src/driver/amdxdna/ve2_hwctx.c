@@ -5,6 +5,7 @@
 #include <drm/drm_cache.h>
 #include <linux/dma-mapping.h>
 #include <linux/dma-buf.h>
+#include <linux/delay.h>
 
 #include "amdxdna_ctx.h"
 #include "amdxdna_gem.h"
@@ -891,9 +892,21 @@ int ve2_cmd_submit(struct amdxdna_ctx *hwctx, struct amdxdna_sched_job *job, u32
 		   u64 *syncobj_points, u32 syncobj_cnt, u64 *seq)
 {
 	struct amdxdna_dev *xdna = hwctx->client->xdna;
+	struct amdxdna_ctx_priv *nhwctx = hwctx->priv;
 	struct amdxdna_gem_obj *cmd_bo = job->cmd_bo;
 	int ret;
 	u32 op;
+
+	if (nhwctx->hwctx_config[0].forever_mode_enabled &&
+	    nhwctx->hwctx_config[0].forever_iteration > 0) {
+		// Forever mode has run or is still running
+		// Block new submissions to prevent conflicts
+		XDNA_ERR(xdna,
+			 "Cannot submit: context %s in forever mode (iteration %u). "
+			 "Call stop or disable forever mode first.",
+			 hwctx->name, nhwctx->hwctx_config[0].forever_iteration);
+		return -EBUSY;
+	}
 
 	op = amdxdna_cmd_get_op(cmd_bo);
 	XDNA_DBG(xdna, "hwctx %p cmd_submit: op=%u (%s), syncobj_cnt=%u",
@@ -1266,6 +1279,13 @@ int ve2_hwctx_init(struct amdxdna_ctx *hwctx)
 	mutex_init(&priv->privctx_lock);
 	priv->state = AMDXDNA_HWCTX_STATE_IDLE;
 
+	/* Check if forever mode should be auto-enabled for this context */
+	if (atomic_read(&xdna->forever_mode_default)) {
+		ve2_hwctx_config_forever_mode(hwctx, 1);
+		XDNA_INFO(xdna, "Forever mode auto-enabled for hwctx %s (forever_mode_default=1)",
+			  hwctx->name);
+	}
+
 	XDNA_DBG(xdna, "hwctx %p initialized: start_col=%u, num_col=%u, queue_addr=0x%llx",
 		 hwctx, priv->start_col, priv->num_col,
 		 priv->hwctx_hsa_queue.hsa_queue_mem.dma_addr);
@@ -1287,6 +1307,7 @@ void ve2_hwctx_fini(struct amdxdna_ctx *hwctx)
 	struct amdxdna_dev *xdna = client->xdna;
 	struct amdxdna_mgmtctx *mgmtctx;
 	struct amdxdna_sched_job *job;
+	u32 forever_iter = 0;
 	int idx;
 
 	XDNA_DBG(xdna,
@@ -1313,6 +1334,59 @@ void ve2_hwctx_fini(struct amdxdna_ctx *hwctx)
 	/* Now cancel any pending work - it will see active_ctx as NULL and bail out */
 	if (mgmtctx->mgmtctx_workq)
 		cancel_work_sync(&mgmtctx->sched_work);
+
+	/*
+	 * Check if forever mode is currently running.
+	 * If so, 'detach' the context -- it will be owned by the kernel, not the user application.
+	 */
+	if (nhwctx->hwctx_config && nhwctx->hwctx_config[0].forever_mode_enabled) {
+		ve2_partition_read_privileged_mem(nhwctx->aie_dev, 0,
+						  offsetof(struct handshake, forever_iteration),
+						  sizeof(u32), &forever_iter);
+
+		if (forever_iter > 0) {
+			XDNA_INFO(xdna,
+				  "Forever mode active (iter=%u), detaching context %s instead of destroying",
+				  forever_iter, hwctx->name);
+
+			/* Do SAFE cleanup only - no memory deallocation */
+			if (enable_polling)
+				del_timer_sync(&hwctx->priv->event_timer);
+
+			/*
+			 * Keep active_ctx pointing to this context (firmware still using it).
+			 * Don't clear it - harmless if IRQ fires (wake_up on empty waitqueue does nothing).
+			 */
+			mgmtctx = &xdna->dev_handle->ve2_mgmtctx[nhwctx->start_col];
+			mutex_lock(&mgmtctx->ctx_lock);
+			ve2_fifo_remove_ctx(mgmtctx, hwctx);
+			mutex_unlock(&mgmtctx->ctx_lock);
+
+			/* Cancel pending scheduler work */
+			if (mgmtctx->mgmtctx_workq)
+				cancel_work_sync(&mgmtctx->sched_work);
+
+			/* Mark as detached and add to global tracking list */
+			nhwctx->forever_mode_detached = true;
+			mutex_lock(&xdna->detached_lock);
+			list_add_tail(&hwctx->detached_list_node, &xdna->detached_forever_ctxs);
+			mutex_unlock(&xdna->detached_lock);
+
+			XDNA_INFO(xdna,
+				  "Context %s detached. Memory kept alive for firmware. "
+				  "Use sysfs forever_mode_stop to reclaim resources.",
+				  hwctx->name);
+
+			/*
+			 * DON'T free:
+			 * - HSA queue (firmware reads/writes it)
+			 * - BOs (firmware reads instruction buffer)
+			 * - Partition (firmware uses handshake memory)
+			 * - Context structures (needed for later reclaim)
+			 */
+			return;  /* Exit early without cleanup */
+		}
+	}
 
 	/*
 	 * Release jobs first to decrement BO refcounts, but they may not
@@ -1386,6 +1460,213 @@ static void ve2_hwctx_config_op_timeout(struct amdxdna_ctx *hwctx, u32 op_timeou
 
 	for (u32 col = 0; col < hwctx->num_col; col++)
 		nhwctx->hwctx_config[col].opcode_timeout_config = op_timeout;
+}
+
+int ve2_hwctx_config_forever_mode(struct amdxdna_ctx *hwctx, u32 enabled)
+{
+	struct amdxdna_ctx_priv *nhwctx = hwctx->priv;
+	struct amdxdna_dev *xdna = hwctx->client->xdna;
+	struct solver_state *xrs = xdna->dev_handle->xrs_hdl;
+	u32 val = enabled;
+	int ret;
+
+	if (enabled > 1)
+		return -EINVAL;
+
+	/* Mark partition as exclusive to block new contexts when forever mode enabled */
+	mutex_lock(&xrs->xrs_lock);
+	ret = xrs_set_partition_exclusive(xrs, (uintptr_t)hwctx, enabled);
+	mutex_unlock(&xrs->xrs_lock);
+
+	if (ret) {
+		XDNA_ERR(xdna, "Failed to set partition exclusive mode: %d", ret);
+		return ret;
+	}
+
+	/* Set forever mode flag in driver-side config and live handshake for all columns */
+	for (u32 col = 0; col < hwctx->num_col; col++) {
+		nhwctx->hwctx_config[col].forever_mode_enabled = enabled;
+
+		/* Write to live handshake in firmware memory */
+		ve2_partition_write_privileged_mem(nhwctx->aie_dev, col,
+						   offsetof(struct handshake, forever_mode_enabled),
+						   sizeof(u32), &val);
+	}
+
+	XDNA_INFO(xdna, "Forever mode %s for context %s (device %s)",
+		  enabled ? "enabled" : "disabled", hwctx->name,
+		  enabled ? "CLAIMED - no new contexts allowed" : "released");
+
+	return 0;
+}
+
+int ve2_hwctx_forever_stop(struct amdxdna_ctx *hwctx)
+{
+	struct amdxdna_ctx_priv *nhwctx = hwctx->priv;
+	struct amdxdna_dev *xdna = hwctx->client->xdna;
+	u32 prev_iteration, curr_iteration;
+	int timeout_ms = 1000; /* 1 second timeout */
+	int poll_interval_ms = 10;
+	int elapsed_ms = 0;
+	u32 val = 1;
+
+	/* Set stop request for all columns in driver config and live handshake */
+	for (u32 col = 0; col < hwctx->num_col; col++) {
+		nhwctx->hwctx_config[col].forever_stop_request = 1;
+
+		/* Write to live handshake in firmware memory */
+		ve2_partition_write_privileged_mem(nhwctx->aie_dev, col,
+						   offsetof(struct handshake, forever_stop_request),
+						   sizeof(u32), &val);
+	}
+
+	/* Poll iteration count to verify firmware stopped */
+	ve2_partition_read_privileged_mem(nhwctx->aie_dev, 0,
+					  offsetof(struct handshake, forever_iteration),
+					  sizeof(u32), &prev_iteration);
+
+	while (elapsed_ms < timeout_ms) {
+		msleep(poll_interval_ms);
+		elapsed_ms += poll_interval_ms;
+
+		/* Read current iteration from live handshake */
+		ve2_partition_read_privileged_mem(nhwctx->aie_dev, 0,
+						  offsetof(struct handshake, forever_iteration),
+						  sizeof(u32), &curr_iteration);
+
+		/* If iteration count hasn't changed, firmware has stopped */
+		if (curr_iteration == prev_iteration) {
+			XDNA_DBG(xdna, "Forever mode stopped at iteration %u after %d ms",
+				 curr_iteration, elapsed_ms);
+			goto stopped;
+		}
+
+		prev_iteration = curr_iteration;
+	}
+
+	/* Timeout - firmware didn't stop */
+	XDNA_WARN(xdna, "Forever mode stop timeout after %d ms (still at iteration %u)",
+		  timeout_ms, curr_iteration);
+	/* Continue anyway to reset state */
+
+stopped:
+	/* Clear exclusive flag in XRS to allow new contexts */
+	{
+		struct solver_state *xrs = xdna->dev_handle->xrs_hdl;
+
+		mutex_lock(&xrs->xrs_lock);
+		xrs_set_partition_exclusive(xrs, (uintptr_t)hwctx, false);
+		mutex_unlock(&xrs->xrs_lock);
+	}
+
+	/* Reset iteration count and status to allow new submissions */
+	val = 0;
+	for (u32 col = 0; col < hwctx->num_col; col++) {
+		nhwctx->hwctx_config[col].forever_stop_request = 0;
+		nhwctx->hwctx_config[col].forever_iteration = 0;
+		nhwctx->hwctx_config[col].forever_last_status = 0;
+
+		/* Clear stop request in live handshake */
+		ve2_partition_write_privileged_mem(nhwctx->aie_dev, col,
+						   offsetof(struct handshake, forever_stop_request),
+						   sizeof(u32), &val);
+	}
+
+	XDNA_INFO(xdna, "Forever mode stopped for context %s (device released for new contexts)",
+		  hwctx->name);
+
+	return 0;
+}
+
+/**
+ * ve2_hwctx_reclaim_detached() - Reclaim resources from a detached forever mode context
+ * @xdna: Device pointer (client may be freed, so passed explicitly)
+ * @hwctx: Context to reclaim
+ *
+ * This function performs full cleanup of a context that was detached due to forever mode.
+ * It should only be called after forever mode has been stopped and verified.
+ * The caller must hold detached_lock.
+ */
+void ve2_hwctx_reclaim_detached(struct amdxdna_dev *xdna, struct amdxdna_ctx *hwctx)
+{
+	struct amdxdna_ctx_priv *nhwctx = hwctx->priv;
+	struct amdxdna_mgmtctx *mgmtctx;
+	struct amdxdna_sched_job *job;
+	int idx;
+
+	if (!nhwctx) {
+		pr_err("amdxdna: Cannot reclaim context %p: priv is NULL\n", hwctx);
+		return;
+	}
+
+	mgmtctx = &xdna->dev_handle->ve2_mgmtctx[nhwctx->start_col];
+
+	XDNA_INFO(xdna, "Reclaiming detached context %s (start_col=%u, num_col=%u)",
+		  hwctx->name, nhwctx->start_col, nhwctx->num_col);
+
+	/* Remove from detached list (caller must hold detached_lock) */
+	list_del(&hwctx->detached_list_node);
+	nhwctx->forever_mode_detached = false;
+
+	/* Clear active_ctx pointer in mgmtctx */
+	mutex_lock(&mgmtctx->ctx_lock);
+	if (mgmtctx->active_ctx == hwctx)
+		mgmtctx->active_ctx = NULL;
+	mutex_unlock(&mgmtctx->ctx_lock);
+
+	/* Release jobs */
+	mutex_lock(&nhwctx->privctx_lock);
+	for (idx = 0; idx < HWCTX_MAX_CMDS; idx++) {
+		job = nhwctx->pending[idx];
+		if (!job)
+			continue;
+
+		kref_get(&job->refcnt);
+		mutex_unlock(&nhwctx->privctx_lock);
+		ve2_hwctx_job_release(hwctx, job);
+		ve2_job_put(job);
+		mutex_lock(&nhwctx->privctx_lock);
+	}
+	mutex_unlock(&nhwctx->privctx_lock);
+
+	if (verbosity >= VERBOSITY_LEVEL_DBG)
+		ve2_get_firmware_status(hwctx);
+
+	/* Destroy partition (XRS handles reference counting) */
+	if (nhwctx->aie_dev)
+		ve2_mgmt_destroy_partition(hwctx);
+
+	/* Free context-specific resources */
+	ve2_free_hsa_queue(xdna, &nhwctx->hwctx_hsa_queue);
+	kfree(nhwctx->hwctx_config);
+	mutex_destroy(&nhwctx->privctx_lock);
+	kfree(nhwctx);
+	hwctx->priv = NULL;
+
+	XDNA_INFO(xdna, "Detached context %s successfully reclaimed", hwctx->name);
+}
+
+int ve2_hwctx_query_forever_status(struct amdxdna_ctx *hwctx,
+				    struct amdxdna_hwctx_forever_status *status)
+{
+	struct amdxdna_ctx_priv *nhwctx = hwctx->priv;
+	struct amdxdna_dev *xdna = hwctx->client->xdna;
+
+	/* Read live values from firmware handshake memory */
+	ve2_partition_read_privileged_mem(nhwctx->aie_dev, 0,
+					  offsetof(struct handshake, forever_iteration),
+					  sizeof(u32), &status->iteration);
+	ve2_partition_read_privileged_mem(nhwctx->aie_dev, 0,
+					  offsetof(struct handshake, forever_last_status),
+					  sizeof(u32), &status->last_status);
+	ve2_partition_read_privileged_mem(nhwctx->aie_dev, 0,
+					  offsetof(struct handshake, forever_mode_enabled),
+					  sizeof(u32), &status->enabled);
+
+	XDNA_DBG(xdna, "Forever status query: enabled=%u iteration=%u status=0x%x",
+		 status->enabled, status->iteration, status->last_status);
+
+	return 0;
 }
 
 int ve2_hwctx_config(struct amdxdna_ctx *hwctx, u32 type, u64 mdata_hdl, void *buf, u32 size)
@@ -1494,6 +1775,36 @@ int ve2_hwctx_config(struct amdxdna_ctx *hwctx, u32 type, u64 mdata_hdl, void *b
 		XDNA_DBG(xdna, "Configured opcode timeout %u on hwctx %s",
 			 op_timeout, hwctx->name);
 		ret = 0;
+		break;
+
+	case DRM_AMDXDNA_HWCTX_CONFIG_FOREVER_MODE: {
+		struct amdxdna_hwctx_forever_mode_config config;
+
+		if (copy_from_user(&config, buf, sizeof(config))) {
+			XDNA_ERR(xdna, "%s: Failed to copy forever mode config from user", __func__);
+			return -EFAULT;
+		}
+
+		ret = ve2_hwctx_config_forever_mode(hwctx, config.enabled);
+		break;
+	}
+
+	case DRM_AMDXDNA_HWCTX_QUERY_FOREVER_STATUS: {
+		struct amdxdna_hwctx_forever_status status;
+
+		ret = ve2_hwctx_query_forever_status(hwctx, &status);
+		if (ret)
+			break;
+
+		if (copy_to_user(buf, &status, sizeof(status))) {
+			XDNA_ERR(xdna, "%s: Failed to copy forever status to user", __func__);
+			return -EFAULT;
+		}
+		break;
+	}
+
+	case DRM_AMDXDNA_HWCTX_FOREVER_STOP:
+		ret = ve2_hwctx_forever_stop(hwctx);
 		break;
 
 	default:
