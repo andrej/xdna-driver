@@ -285,24 +285,33 @@ struct handshake {
 	}
 	dbg;
 	struct {
-		u32 dbg_buf_addr_high; //5c
 		u32 dbg_buf_addr_low;  //60
 		u32 size;   // 64
 	}
-	dbg_buf;
-	union {
-		struct {
-			u16 page_index;
-			u16 fired_count;
+		u32 forever_mode_enabled;     // 74 - Driver sets to enable forever mode
+		u32 forever_stop_request;     // 78 - Driver sets to request stop
+		u32 forever_iteration;        // 7c - FW updates current iteration (read-only)
+		u32 forever_last_status;      // 80 - FW updates last status (read-only)
+		u32 reserved1[3]; // make sure vm (below) starts at offset 0xa0
 		}
 		info;
 		u32 raw;
 	}
 	trace_save; // 68 This needs to be saved/restored during ctx switch to support preemption
+<<<<<<< HEAD
 	u32 doorbell_pending; // 6c  this is to solve the race condition.
 			      //MPNPU will set it to 1 when it receives doorbell from host.
 	u32 runlist_read_idx; // 70 relative read index in the runlist
 	u32 reserved1[7]; //make sure vm (below) starts at offset 0xa0
+=======
+	u32 doorbell_pending;         // 6c  this is to solve the race condition.
+				      //MPNPU will set it to 1 when it receives doorbell from host.
+	u32 forever_mode_enabled;     // 70 - Driver sets to enable forever mode
+	u32 forever_stop_request;     // 74 - Driver sets to request stop
+	u32 forever_iteration;        // 78 - FW updates current iteration (read-only)
+	u32 forever_last_status;      // 7c - FW updates last status (read-only)
+	u32 reserved1[4];             // 80-8c (make sure vm (below) starts at offset 0xa0)
+>>>>>>> 9fa63a9 (forever mode: first fully working version)
 	u32 last_ddr_dm2mm_addr_high; // 90
 	u32 last_ddr_dm2mm_addr_low; // 94
 	u32 last_ddr_mm2dm_addr_high; // 98

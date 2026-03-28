@@ -62,6 +62,12 @@ static void cert_setup_partition(struct amdxdna_dev *xdna,
 	/* Opcode Timeout */
 	cert_hs->opcode_timeout_config = hwctx_cfg->opcode_timeout_config;
 
+	/* Forever mode configuration */
+	cert_hs->forever_mode_enabled = hwctx_cfg->forever_mode_enabled;
+	cert_hs->forever_stop_request = hwctx_cfg->forever_stop_request;
+	cert_hs->forever_iteration = hwctx_cfg->forever_iteration;
+	cert_hs->forever_last_status = hwctx_cfg->forever_last_status;
+
 	cert_hs->ctx_switch_req = 0;
 	cert_hs->hsa_location = 0;
 	cert_hs->dbg.hsa_addr_high = 0xFFFFFFFF;
@@ -758,10 +764,10 @@ static void ve2_irq_handler(u32 partition_id, void *cb_arg)
 		 partition_id, mgmtctx->start_col);
 	mutex_lock(&mgmtctx->ctx_lock);
 
-	/* Just wake active hwctx */
+	/* Get active hwctx (may be detached but still active_ctx) */
 	hwctx = mgmtctx->active_ctx;
 	if (!hwctx || !hwctx->priv) {
-		XDNA_ERR(xdna, "Invalid hwctx");
+		XDNA_DBG(xdna, "IRQ: no active context, ignoring");
 		mutex_unlock(&mgmtctx->ctx_lock);
 		return;
 	}
@@ -799,6 +805,11 @@ static void ve2_irq_handler(u32 partition_id, void *cb_arg)
 	 */
 	pop_from_ctx_command_fifo_till(mgmtctx, hwctx, read_index);
 
+	/*
+	 * Wake up any waiting threads.
+	 * For detached contexts, no one is waiting (application exited),
+	 * so this does nothing (harmless).
+	 */
 	wake_up_interruptible_all(&hwctx->priv->waitq);
 
 	trace_amdxdna_trace_point("XRT_PROFILING_TRACE_EXIT",
@@ -1351,7 +1362,7 @@ int ve2_mgmt_destroy_partition(struct amdxdna_ctx *hwctx)
 
 		cert_clear_partition(xdna, nhwctx);
 		mutex_lock(&mgmtctx->ctx_lock);
-		/* Update the active context as partition doesn't exists any more */
+		/* Clear active context as partition doesn't exist anymore */
 		mgmtctx->active_ctx = NULL;
 		wq = mgmtctx->mgmtctx_workq;
 		mgmtctx->mgmtctx_workq = NULL;
@@ -1364,11 +1375,6 @@ int ve2_mgmt_destroy_partition(struct amdxdna_ctx *hwctx)
 		XDNA_DBG(xdna, "%s: Un-registered ve2_aie_error_cb() callback\n", __func__);
 		aie_partition_teardown(nhwctx->aie_dev);
 		aie_partition_release(nhwctx->aie_dev);
-	} else {
-		mutex_lock(&mgmtctx->ctx_lock);
-		if (mgmtctx->active_ctx == hwctx)
-			mgmtctx->active_ctx = NULL;
-		mutex_unlock(&mgmtctx->ctx_lock);
 	}
 
 unlock_xrs_lock:

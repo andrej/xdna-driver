@@ -218,13 +218,40 @@ struct fw_buffer_metadata {
  */
 struct amdxdna_drm_config_hwctx {
 	__u32 handle;
-#define DRM_AMDXDNA_HWCTX_CONFIG_CU		0
-#define DRM_AMDXDNA_HWCTX_ASSIGN_DBG_BUF	1
-#define DRM_AMDXDNA_HWCTX_REMOVE_DBG_BUF	2
-#define DRM_AMDXDNA_HWCTX_CONFIG_OPCODE_TIMEOUT	3
+#define DRM_AMDXDNA_HWCTX_CONFIG_CU			0
+#define DRM_AMDXDNA_HWCTX_ASSIGN_DBG_BUF		1
+#define DRM_AMDXDNA_HWCTX_REMOVE_DBG_BUF		2
+#define DRM_AMDXDNA_HWCTX_CONFIG_OPCODE_TIMEOUT		3
+#define DRM_AMDXDNA_HWCTX_CONFIG_FOREVER_MODE		4
+#define DRM_AMDXDNA_HWCTX_QUERY_FOREVER_STATUS		5
+#define DRM_AMDXDNA_HWCTX_FOREVER_STOP			6
 	__u32 param_type;
 	__u64 param_val;
 	__u32 param_val_size;
+	__u32 pad;
+};
+
+/**
+ * struct amdxdna_hwctx_forever_mode_config - Forever mode configuration
+ * @enabled: 1 to enable forever mode, 0 to disable
+ * @pad: Padding for alignment
+ */
+struct amdxdna_hwctx_forever_mode_config {
+	__u32 enabled;
+	__u32 pad;
+};
+
+/**
+ * struct amdxdna_hwctx_forever_status - Forever mode status
+ * @iteration: Current iteration count from firmware
+ * @last_status: Last completion status from firmware
+ * @enabled: Current forever mode enabled state
+ * @pad: Padding for alignment
+ */
+struct amdxdna_hwctx_forever_status {
+	__u32 iteration;
+	__u32 last_status;
+	__u32 enabled;
 	__u32 pad;
 };
 
