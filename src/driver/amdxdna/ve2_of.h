@@ -12,6 +12,7 @@
 #include "amdxdna_aux_drv.h"
 #include "ve2_host_queue.h"
 #include "ve2_fw.h"
+#include "drm_local/amdxdna_accel.h"
 
 #define HWCTX_MAX_CMDS		HOST_QUEUE_ENTRY
 #define get_job_idx(seq)	((seq) & (HWCTX_MAX_CMDS - 1))
@@ -74,6 +75,11 @@ struct ve2_config_hwctx {
 	u32	debug_buf_size;
 	u64	dtrace_addr;
 	u32	opcode_timeout_config;
+	/* Forever mode fields */
+	u32	forever_mode_enabled;
+	u32	forever_stop_request;
+	u32	forever_iteration;
+	u32	forever_last_status;
 };
 
 // Define the node struct for the FIFO queue
@@ -98,6 +104,8 @@ struct amdxdna_ctx_priv {
 	struct timer_list		event_timer;
 	bool			misc_intrpt_flag; /* Hardware sync required */
 	struct mutex			privctx_lock; /* protect private ctx */
+	/* Forever mode detached state */
+	bool				forever_mode_detached;
 };
 
 struct amdxdna_dev_priv {
@@ -157,6 +165,11 @@ void ve2_auto_select_mem_bitmap(struct amdxdna_dev *xdna, struct amdxdna_ctx *hw
 int ve2_hwctx_init(struct amdxdna_ctx *hwctx);
 void ve2_hwctx_fini(struct amdxdna_ctx *hwctx);
 int ve2_hwctx_config(struct amdxdna_ctx *hwctx, u32 type, u64 mdata_hdl, void *buf, u32 size);
+int ve2_hwctx_config_forever_mode(struct amdxdna_ctx *hwctx, u32 enabled);
+int ve2_hwctx_forever_stop(struct amdxdna_ctx *hwctx);
+int ve2_hwctx_query_forever_status(struct amdxdna_ctx *hwctx,
+				    struct amdxdna_hwctx_forever_status *status);
+void ve2_hwctx_reclaim_detached(struct amdxdna_dev *xdna, struct amdxdna_ctx *hwctx);
 void ve2_free_firmware_slots(struct amdxdna_dev_hdl *xdna_hdl, u32 max_cols);
 
 int ve2_cmd_submit(struct amdxdna_sched_job *job, u32 *syncobj_hdls,

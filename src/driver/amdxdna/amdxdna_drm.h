@@ -156,6 +156,7 @@ struct amdxdna_dev {
 	struct list_head		client_list;
 	struct amdxdna_fw_ver		fw_ver;
 	struct amdxdna_cert_ver		cert_ver;
+	atomic_t			forever_mode_default; /* Enable forever mode for new contexts */
 	struct amdxdna_dpt		*fw_log;
 	struct amdxdna_dpt		*fw_trace;
 #ifdef AMDXDNA_DEVEL
@@ -169,6 +170,10 @@ struct amdxdna_dev {
 	struct iommu_group		*group;
 	struct iommu_domain		*domain;
 	struct iova_domain		iovad;
+
+	/* Forever mode detached contexts */
+	struct list_head		detached_forever_ctxs;
+	struct mutex			detached_lock;
 };
 
 struct amdxdna_stats {

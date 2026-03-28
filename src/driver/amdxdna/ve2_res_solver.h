@@ -139,5 +139,6 @@ int xrs_release_resource(void *hdl, u64 rid, struct xrs_action_load *action);
 struct solver_node *rg_search_node(struct solver_rgroup *rgp, u64 rid);
 
 int xrs_get_total_cols(struct solver_state *xrs);
+int xrs_set_partition_exclusive(void *hdl, u64 rid, bool exclusive);
 
 #endif /* _VE2_SOLVER_H_ */

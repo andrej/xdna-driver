@@ -10,6 +10,9 @@
 
 #include "amdxdna_devel.h"
 #include "amdxdna_aux_drv.h"
+#include "amdxdna_ctx.h"
+#include "amdxdna_sysfs.h"
+#include "ve2_of.h"
 
 static int amdxdna_aux_probe(struct auxiliary_device *auxdev,
 			     const struct auxiliary_device_id *id)
@@ -27,6 +30,8 @@ static int amdxdna_aux_probe(struct auxiliary_device *auxdev,
 
 	drmm_mutex_init(&xdna->ddev, &xdna->dev_lock);
 	INIT_LIST_HEAD(&xdna->client_list);
+	INIT_LIST_HEAD(&xdna->detached_forever_ctxs);
+	mutex_init(&xdna->detached_lock);
 	auxiliary_set_drvdata(auxdev, xdna);
 
 	mutex_lock(&xdna->dev_lock);
@@ -40,10 +45,16 @@ static int amdxdna_aux_probe(struct auxiliary_device *auxdev,
 
 	xdna->vbnv = xdna->dev_info->default_vbnv;
 
+	ret = amdxdna_sysfs_init(xdna);
+	if (ret) {
+		XDNA_ERR(xdna, "Create amdxdna sysfs attrs failed: %d", ret);
+		goto err_fini;
+	}
+
 	ret = drm_dev_register(&xdna->ddev, 0);
 	if (ret) {
 		XDNA_ERR(xdna, "DRM register failed, ret %d", ret);
-		goto err_fini;
+		goto err_sysfs;
 	}
 
 	if (!xdna->dev_handle) {
@@ -80,6 +91,8 @@ static int amdxdna_aux_probe(struct auxiliary_device *auxdev,
 	return 0;
 out:
 	drm_dev_unregister(&xdna->ddev);
+err_sysfs:
+	amdxdna_sysfs_fini(xdna);
 err_fini:
 	mutex_lock(&xdna->dev_lock);
 	xdna->dev_info->ops->fini(xdna);
@@ -93,8 +106,35 @@ err_fini:
 static void amdxdna_aux_remove(struct auxiliary_device *auxdev)
 {
 	struct amdxdna_dev *xdna = auxiliary_get_drvdata(auxdev);
+	struct amdxdna_ctx *ctx;
 
 	drm_dev_unplug(&xdna->ddev);
+
+	/* Force-stop and reclaim any detached forever mode contexts */
+	mutex_lock(&xdna->detached_lock);
+	while (!list_empty(&xdna->detached_forever_ctxs)) {
+		ctx = list_first_entry(&xdna->detached_forever_ctxs,
+				       struct amdxdna_ctx, detached_list_node);
+
+		XDNA_WARN(xdna,
+			  "Driver unload: force-stopping detached forever context %s (ctx_id=%u)",
+			  ctx->name, ctx->id);
+
+		/* Stop forever mode - this polls until firmware stops */
+		ve2_hwctx_forever_stop(ctx);
+
+		/* Reclaim all resources (removes from list) */
+		ve2_hwctx_reclaim_detached(xdna, ctx);
+
+		/* Free the context structure itself */
+		kfree(ctx->name);
+		kfree(ctx);
+	}
+	mutex_unlock(&xdna->detached_lock);
+	mutex_destroy(&xdna->detached_lock);
+
+	amdxdna_sysfs_fini(xdna);
+
 	mutex_lock(&xdna->dev_lock);
 	xdna->dev_info->ops->fini(xdna);
 	mutex_unlock(&xdna->dev_lock);
