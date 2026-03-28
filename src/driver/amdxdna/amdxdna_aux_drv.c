@@ -121,7 +121,7 @@ static void amdxdna_aux_remove(struct auxiliary_device *auxdev)
 			  ctx->name, ctx->id);
 
 		/* Stop forever mode - this polls until firmware stops */
-		ve2_hwctx_forever_stop(ctx);
+		ve2_hwctx_forever_stop(xdna, ctx);
 
 		/* Reclaim all resources (removes from list) */
 		ve2_hwctx_reclaim_detached(xdna, ctx);

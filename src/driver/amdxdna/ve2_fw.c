@@ -79,10 +79,9 @@ done:
 	return ret;
 }
 
-int ve2_get_firmware_status(struct amdxdna_ctx *hwctx)
+int ve2_get_firmware_status(struct amdxdna_dev *xdna, struct amdxdna_ctx *hwctx)
 {
 	struct amdxdna_ctx_priv *priv_ctx = hwctx->priv;
-	struct amdxdna_dev *xdna = hwctx->client->xdna;
 	int ret = 0;
 
 	if (!priv_ctx->aie_dev) {

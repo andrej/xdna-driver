@@ -162,7 +162,7 @@ static ssize_t forever_mode_stop_store(struct device *dev,
 			was_detached = true;
 
 			/* Stop forever mode (polls until firmware stops) */
-			ret = ve2_hwctx_forever_stop(ctx);
+			ret = ve2_hwctx_forever_stop(xdna, ctx);
 			if (ret) {
 				mutex_unlock(&xdna->detached_lock);
 				XDNA_ERR(xdna, "Failed to stop forever mode for detached ctx %u: %d",
@@ -204,7 +204,7 @@ static ssize_t forever_mode_stop_store(struct device *dev,
 		return -EINVAL;
 	}
 
-	ret = ve2_hwctx_forever_stop(ctx);
+	ret = ve2_hwctx_forever_stop(xdna, ctx);
 	srcu_read_unlock(&client->ctx_srcu, idx);
 	mutex_unlock(&xdna->dev_lock);
 
@@ -243,7 +243,7 @@ static ssize_t forever_mode_status_show(struct device *dev,
 		xa_for_each(&client->ctx_xa, ctx_id, ctx) {
 			memset(&status, 0, sizeof(status));
 
-			ret = ve2_hwctx_query_forever_status(ctx, &status);
+			ret = ve2_hwctx_query_forever_status(xdna, ctx, &status);
 			if (ret == 0) {
 				len += sprintf(buf + len, "%-6lu  %-7u  %-9u  0x%08x   active\n",
 					       ctx_id, status.enabled, status.iteration,
@@ -259,7 +259,7 @@ static ssize_t forever_mode_status_show(struct device *dev,
 	list_for_each_entry(ctx, &xdna->detached_forever_ctxs, detached_list_node) {
 		memset(&status, 0, sizeof(status));
 
-		ret = ve2_hwctx_query_forever_status(ctx, &status);
+		ret = ve2_hwctx_query_forever_status(xdna, ctx, &status);
 		if (ret == 0) {
 			len += sprintf(buf + len, "%-6u  %-7u  %-9u  0x%08x   detached\n",
 				       ctx->id, status.enabled, status.iteration,

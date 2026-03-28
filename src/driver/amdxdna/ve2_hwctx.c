@@ -1631,9 +1631,9 @@ void ve2_hwctx_fini(struct amdxdna_ctx *hwctx)
 	mutex_unlock(&nhwctx->privctx_lock);
 
 	if (verbosity >= VERBOSITY_LEVEL_DBG)
-		ve2_get_firmware_status(hwctx);
+		ve2_get_firmware_status(xdna, hwctx);
 
-	ve2_mgmt_destroy_partition(hwctx);
+	ve2_mgmt_destroy_partition(xdna, hwctx);
 	ve2_free_hsa_queue(xdna, &hwctx->priv->hwctx_hsa_queue);
 	kfree(hwctx->priv->hwctx_config);
 	mutex_destroy(&hwctx->priv->privctx_lock);
@@ -1731,10 +1731,9 @@ int ve2_hwctx_config_forever_mode(struct amdxdna_ctx *hwctx, u32 enabled)
 	return 0;
 }
 
-int ve2_hwctx_forever_stop(struct amdxdna_ctx *hwctx)
+int ve2_hwctx_forever_stop(struct amdxdna_dev *xdna, struct amdxdna_ctx *hwctx)
 {
 	struct amdxdna_ctx_priv *nhwctx = hwctx->priv;
-	struct amdxdna_dev *xdna = hwctx->client->xdna;
 	u32 prev_iteration, curr_iteration;
 	int timeout_ms = 1000; /* 1 second timeout */
 	int poll_interval_ms = 10;
@@ -1861,11 +1860,11 @@ void ve2_hwctx_reclaim_detached(struct amdxdna_dev *xdna, struct amdxdna_ctx *hw
 	mutex_unlock(&nhwctx->privctx_lock);
 
 	if (verbosity >= VERBOSITY_LEVEL_DBG)
-		ve2_get_firmware_status(hwctx);
+		ve2_get_firmware_status(xdna, hwctx);
 
 	/* Destroy partition (XRS handles reference counting) */
 	if (nhwctx->aie_dev)
-		ve2_mgmt_destroy_partition(hwctx);
+		ve2_mgmt_destroy_partition(xdna, hwctx);
 
 	/* Free context-specific resources */
 	ve2_free_hsa_queue(xdna, &nhwctx->hwctx_hsa_queue);
@@ -1877,11 +1876,10 @@ void ve2_hwctx_reclaim_detached(struct amdxdna_dev *xdna, struct amdxdna_ctx *hw
 	XDNA_INFO(xdna, "Detached context %s successfully reclaimed", hwctx->name);
 }
 
-int ve2_hwctx_query_forever_status(struct amdxdna_ctx *hwctx,
+int ve2_hwctx_query_forever_status(struct amdxdna_dev *xdna, struct amdxdna_ctx *hwctx,
 				    struct amdxdna_hwctx_forever_status *status)
 {
 	struct amdxdna_ctx_priv *nhwctx = hwctx->priv;
-	struct amdxdna_dev *xdna = hwctx->client->xdna;
 
 	/* Read live values from firmware handshake memory */
 	ve2_partition_read_privileged_mem(nhwctx->aie_dev, 0,
@@ -2020,7 +2018,7 @@ int ve2_hwctx_config(struct amdxdna_ctx *hwctx, u32 type, u64 mdata_hdl, void *b
 	case DRM_AMDXDNA_HWCTX_QUERY_FOREVER_STATUS: {
 		struct amdxdna_hwctx_forever_status status;
 
-		ret = ve2_hwctx_query_forever_status(hwctx, &status);
+		ret = ve2_hwctx_query_forever_status(xdna, hwctx, &status);
 		if (ret)
 			break;
 
@@ -2032,7 +2030,7 @@ int ve2_hwctx_config(struct amdxdna_ctx *hwctx, u32 type, u64 mdata_hdl, void *b
 	}
 
 	case DRM_AMDXDNA_HWCTX_FOREVER_STOP:
-		ret = ve2_hwctx_forever_stop(hwctx);
+		ret = ve2_hwctx_forever_stop(xdna, hwctx);
 		break;
 
 	default:

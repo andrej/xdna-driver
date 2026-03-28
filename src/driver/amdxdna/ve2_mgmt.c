@@ -265,7 +265,7 @@ int ve2_xrs_request(struct amdxdna_dev *xdna, struct amdxdna_ctx *hwctx)
 	return 0;
 
 destroy_partition:
-	ve2_mgmt_destroy_partition(hwctx);
+	ve2_mgmt_destroy_partition(xdna, hwctx);
 xrs_release:
 	xrs_release_resource(xrs, (uintptr_t)hwctx, &load_act);
 free_start_cols:
@@ -1350,9 +1350,8 @@ static void cert_clear_partition(struct amdxdna_dev *xdna, struct amdxdna_ctx_pr
  * tears down and releases the AIE partition, and updates the management context state.
  * It should be called when a hardware context is no longer needed.
  */
-int ve2_mgmt_destroy_partition(struct amdxdna_ctx *hwctx)
+int ve2_mgmt_destroy_partition(struct amdxdna_dev *xdna, struct amdxdna_ctx *hwctx)
 {
-	struct amdxdna_dev *xdna = hwctx->client->xdna;
 	struct amdxdna_ctx_priv *nhwctx = hwctx->priv;
 	struct amdxdna_mgmtctx  *mgmtctx = NULL;
 	u32 start_col = nhwctx->start_col;

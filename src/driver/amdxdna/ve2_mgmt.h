@@ -187,7 +187,7 @@ int ve2_create_coredump(struct amdxdna_dev *xdna, struct amdxdna_ctx *hwctx,
  * Returns 0 on success or a negative error code.
  */
 
-int ve2_mgmt_destroy_partition(struct amdxdna_ctx *hwctx);
+int ve2_mgmt_destroy_partition(struct amdxdna_dev *xdna, struct amdxdna_ctx *hwctx);
 /**
  * ve2_get_hwctx - Retrieve the hardware context for a given column.
  * @xdna: Pointer to the device structure.
