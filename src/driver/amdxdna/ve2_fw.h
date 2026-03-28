@@ -13,6 +13,7 @@
 #define VE2_FW_DATE_STRING_LENGTH	11
 
 struct amdxdna_dev_hdl;
+struct amdxdna_dev;
 struct amdxdna_ctx;
 
 struct ve2_firmware_version {
@@ -31,6 +32,6 @@ struct ve2_firmware_status {
 };
 
 int ve2_store_firmware_version(struct ve2_firmware_version *c_version, struct device *xaie_dev);
-int ve2_get_firmware_status(struct amdxdna_ctx *hwctx);
+int ve2_get_firmware_status(struct amdxdna_dev *xdna, struct amdxdna_ctx *hwctx);
 
 #endif /* _VE2_FW_H_ */

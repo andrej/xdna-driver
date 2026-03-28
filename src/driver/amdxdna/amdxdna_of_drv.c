@@ -128,7 +128,7 @@ static void amdxdna_of_remove(struct platform_device *pdev)
 			  ctx->name, ctx->id);
 
 		/* Stop forever mode - this polls until firmware stops */
-		ve2_hwctx_forever_stop(ctx);
+		ve2_hwctx_forever_stop(xdna, ctx);
 
 		/* Reclaim all resources (removes from list) */
 		ve2_hwctx_reclaim_detached(xdna, ctx);
