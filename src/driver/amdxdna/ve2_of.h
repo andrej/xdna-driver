@@ -105,13 +105,13 @@ struct amdxdna_ctx_priv {
 	bool			misc_intrpt_flag; /* Hardware sync required */
 	struct mutex			privctx_lock; /* protect private ctx */
 	/*
-	 * Extra BO references held while forever mode is active.
+	 * Extra BO references kept alive while forever mode is active.
 	 * Firmware continues to DMA from these buffers after the application
-	 * exits and the job is released, so we must keep them pinned.
+	 * exits, so we must prevent them from being freed.
+	 * Taken at submit time, released when forever mode stops.
 	 */
-	struct amdxdna_gem_obj		*forever_cmd_bo;
-	struct amdxdna_gem_obj		**forever_arg_bos;
-	u32				forever_arg_bo_cnt;
+	struct drm_gem_object		**forever_bo_refs;
+	u32				forever_bo_ref_cnt;
 };
 
 struct amdxdna_dev_priv {
