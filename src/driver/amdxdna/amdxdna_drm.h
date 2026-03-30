@@ -157,7 +157,6 @@ struct amdxdna_dev {
 	struct amdxdna_fw_ver		fw_ver;
 	struct amdxdna_cert_ver		cert_ver;
 	atomic_t			forever_mode_default; /* Enable forever mode for new contexts */
-	struct amdxdna_cert_ver		cert_ver;
 	struct amdxdna_dpt		*fw_log;
 	struct amdxdna_dpt		*fw_trace;
 #ifdef AMDXDNA_DEVEL
@@ -175,10 +174,7 @@ struct amdxdna_dev {
 	/* Forever mode detached contexts */
 	struct list_head		detached_forever_ctxs;
 	struct mutex			detached_lock;
-
-	/* Forever mode detached contexts */
-	struct list_head		detached_forever_ctxs;
-	struct mutex			detached_lock;
+	u32				next_detached_id;
 };
 
 struct amdxdna_stats {

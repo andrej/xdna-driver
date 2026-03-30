@@ -1593,10 +1593,17 @@ void ve2_hwctx_fini(struct amdxdna_ctx *hwctx)
 				  "Forever mode active (iter=%u), detaching context %s instead of destroying",
 				  forever_iter, hwctx->name);
 
+			/* Mark as detached and add to global tracking list */
+			hwctx->forever_mode_detached = true;
+			mutex_lock(&xdna->detached_lock);
+			hwctx->id = xdna->next_detached_id++;
+			list_add_tail(&hwctx->detached_list_node, &xdna->detached_forever_ctxs);
+			mutex_unlock(&xdna->detached_lock);
+
 			XDNA_INFO(xdna,
-				  "Context %s detached. Memory kept alive for firmware. "
+				  "Context %s detached as detached_id=%u. Memory kept alive for firmware. "
 				  "Use sysfs forever_mode_stop to reclaim resources.",
-				  hwctx->name);
+				  hwctx->name, hwctx->id);
 
 			/*
 			 * DON'T free:
