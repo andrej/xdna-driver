@@ -103,8 +103,14 @@ struct amdxdna_ctx_priv {
 	struct timer_list		event_timer;
 	bool			misc_intrpt_flag; /* Hardware sync required */
 	struct mutex			privctx_lock; /* protect private ctx */
-	/* Forever mode detached state */
-	bool				forever_mode_detached;
+	/*
+	 * Extra BO references held while forever mode is active.
+	 * Firmware continues to DMA from these buffers after the application
+	 * exits and the job is released, so we must keep them pinned.
+	 */
+	struct amdxdna_gem_obj		*forever_cmd_bo;
+	struct amdxdna_gem_obj		**forever_arg_bos;
+	u32				forever_arg_bo_cnt;
 };
 
 struct amdxdna_dev_priv {
