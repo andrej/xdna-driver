@@ -45,6 +45,7 @@ static int amdxdna_of_probe(struct platform_device *pdev)
 	INIT_LIST_HEAD(&xdna->client_list);
 	INIT_LIST_HEAD(&xdna->detached_forever_ctxs);
 	mutex_init(&xdna->detached_lock);
+	xdna->next_detached_id = AMDXDNA_MAX_CTX_ID + 1;
 	platform_set_drvdata(pdev, xdna);
 
 	if (!xdna->dev_info->ops->init || !xdna->dev_info->ops->fini)

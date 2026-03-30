@@ -6,6 +6,8 @@
 #ifndef _AMDXDNA_CTX_H_
 #define _AMDXDNA_CTX_H_
 
+#define AMDXDNA_MAX_CTX_ID	255
+
 #include <linux/bitfield.h>
 #include <linux/kref.h>
 #include <linux/list.h>

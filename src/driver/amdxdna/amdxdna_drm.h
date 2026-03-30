@@ -161,6 +161,7 @@ struct amdxdna_dev {
 	/* Forever mode detached contexts */
 	struct list_head		detached_forever_ctxs;
 	struct mutex			detached_lock;
+	u32				next_detached_id;
 };
 
 struct amdxdna_stats {

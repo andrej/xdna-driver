@@ -15,7 +15,6 @@
 #include "amdxdna_ctx.h"
 #include "amdxdna_trace.h"
 
-#define MAX_CTX_ID		255
 #define MAX_ARG_COUNT		4095
 
 struct amdxdna_fence {
@@ -127,7 +126,7 @@ int amdxdna_drm_create_hwctx_ioctl(struct drm_device *dev, void *data, struct dr
 	ctx->umq_bo = args->umq_bo;
 	ctx->log_buf_bo = args->log_buf_bo;
 	ret = xa_alloc_cyclic(&client->ctx_xa, &ctx->id, ctx,
-			      XA_LIMIT(AMDXDNA_INVALID_CTX_HANDLE + 1, MAX_CTX_ID),
+			      XA_LIMIT(AMDXDNA_INVALID_CTX_HANDLE + 1, AMDXDNA_MAX_CTX_ID),
 			      &client->next_ctxid, GFP_KERNEL);
 	if (ret < 0) {
 		XDNA_ERR(xdna, "Allocate ctx ID failed, ret %d", ret);
