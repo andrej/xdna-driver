@@ -268,6 +268,8 @@ struct amdxdna_ctx {
 	/* Forever mode: context survives application exit */
 	bool				forever_mode_detached;
 	struct list_head		detached_list_node;
+	struct kobject			*forever_kobj;
+	void				*forever_bo_attrs;
 };
 
 #define drm_job_to_xdna_job(j) \

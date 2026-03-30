@@ -4,6 +4,7 @@
  */
 #include "amdxdna_sysfs.h"
 #include "amdxdna_ctx.h"
+#include "amdxdna_gem.h"
 #include "ve2_of.h"
 
 static ssize_t vbnv_show(struct device *dev, struct device_attribute *attr, char *buf)
@@ -289,6 +290,109 @@ static struct attribute *amdxdna_attrs[] = {
 static struct attribute_group amdxdna_attr_group = {
 	.attrs = amdxdna_attrs,
 };
+
+/*
+ * Per-BO sysfs attribute for detached forever mode contexts.
+ * Each file shows the physical/DMA address and size of a pinned BO.
+ */
+struct forever_bo_attr {
+	struct kobj_attribute	kattr;
+	struct drm_gem_object	*obj;
+};
+
+static ssize_t forever_bo_show(struct kobject *kobj, struct kobj_attribute *attr, char *buf)
+{
+	struct forever_bo_attr *bo_attr = container_of(attr, struct forever_bo_attr, kattr);
+	struct amdxdna_gem_obj *abo = to_xdna_obj(bo_attr->obj);
+
+	return sprintf(buf, "0x%llx %zu\n", amdxdna_gem_dev_addr(abo), abo->mem.size);
+}
+
+int amdxdna_sysfs_create_forever_ctx(struct amdxdna_dev *xdna, struct amdxdna_ctx *ctx)
+{
+	struct amdxdna_ctx_priv *nhwctx = ctx->priv;
+	struct forever_bo_attr *bo_attrs;
+	char dir_name[32];
+	int ret;
+	u32 i;
+
+	snprintf(dir_name, sizeof(dir_name), "forever_ctx_%u", ctx->id);
+
+	ctx->forever_kobj = kobject_create_and_add(dir_name, &xdna->ddev.dev->kobj);
+	if (!ctx->forever_kobj) {
+		XDNA_ERR(xdna, "Failed to create sysfs dir %s", dir_name);
+		return -ENOMEM;
+	}
+
+	/* Create one file per pinned BO */
+	bo_attrs = kcalloc(nhwctx->forever_bo_ref_cnt, sizeof(*bo_attrs), GFP_KERNEL);
+	if (!bo_attrs) {
+		ret = -ENOMEM;
+		goto remove_dir;
+	}
+
+	for (i = 0; i < nhwctx->forever_bo_ref_cnt; i++) {
+		char *name = kasprintf(GFP_KERNEL, "bo_%u", i);
+
+		if (!name) {
+			ret = -ENOMEM;
+			goto remove_files;
+		}
+
+		bo_attrs[i].obj = nhwctx->forever_bo_refs[i];
+		sysfs_attr_init(&bo_attrs[i].kattr.attr);
+		bo_attrs[i].kattr.attr.name = name;
+		bo_attrs[i].kattr.attr.mode = 0444;
+		bo_attrs[i].kattr.show = forever_bo_show;
+
+		ret = sysfs_create_file(ctx->forever_kobj, &bo_attrs[i].kattr.attr);
+		if (ret) {
+			kfree(name);
+			goto remove_files;
+		}
+	}
+
+	ctx->forever_bo_attrs = bo_attrs;
+
+	XDNA_INFO(xdna, "Created sysfs dir %s with %u BO files", dir_name,
+		  nhwctx->forever_bo_ref_cnt);
+	return 0;
+
+remove_files:
+	for (u32 j = 0; j < i; j++) {
+		sysfs_remove_file(ctx->forever_kobj, &bo_attrs[j].kattr.attr);
+		kfree(bo_attrs[j].kattr.attr.name);
+	}
+	kfree(bo_attrs);
+remove_dir:
+	kobject_put(ctx->forever_kobj);
+	ctx->forever_kobj = NULL;
+	return ret;
+}
+
+void amdxdna_sysfs_remove_forever_ctx(struct amdxdna_ctx *ctx)
+{
+	struct forever_bo_attr *bo_attrs;
+	struct amdxdna_ctx_priv *nhwctx;
+	u32 i;
+
+	if (!ctx->forever_kobj)
+		return;
+
+	nhwctx = ctx->priv;
+	bo_attrs = ctx->forever_bo_attrs;
+
+	if (bo_attrs && nhwctx) {
+		for (i = 0; i < nhwctx->forever_bo_ref_cnt; i++) {
+			sysfs_remove_file(ctx->forever_kobj, &bo_attrs[i].kattr.attr);
+			kfree(bo_attrs[i].kattr.attr.name);
+		}
+		kfree(bo_attrs);
+	}
+
+	kobject_put(ctx->forever_kobj);
+	ctx->forever_kobj = NULL;
+}
 
 int amdxdna_sysfs_init(struct amdxdna_dev *xdna)
 {
