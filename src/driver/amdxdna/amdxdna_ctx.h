@@ -263,7 +263,8 @@ struct amdxdna_ctx {
 	struct work_struct		dispatch_work;
 	struct work_struct		yield_work;
 
-	/* Forever mode detached list */
+	/* Forever mode: context survives application exit */
+	bool				forever_mode_detached;
 	struct list_head		detached_list_node;
 };
 

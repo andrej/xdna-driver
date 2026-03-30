@@ -69,7 +69,7 @@ static void amdxdna_ctx_destroy_rcu(struct amdxdna_ctx *ctx, struct srcu_struct 
 	 * If ctx_fini detached this context (forever mode active),
 	 * the context is now owned by the detached list and must not be freed here.
 	 */
-	if (ctx->priv && ctx->priv->forever_mode_detached)
+	if (ctx->forever_mode_detached)
 		return;
 
 	mutex_destroy(&ctx->io_lock);
