@@ -1010,28 +1010,60 @@ int ve2_cmd_submit(struct amdxdna_sched_job *job, u32 *syncobj_hdls,
 		 hwctx, *seq, hwctx->priv->start_col, hwctx->client->pid);
 
 	/*
-	 * Pin BOs that firmware will continue to access in forever mode.
-	 * The job holding these refs gets released during cmd_wait (first
-	 * iteration complete), but firmware keeps DMA-ing from these buffers.
-	 * Take extra refs here so the DMA memory survives process exit.
+	 * Pin ALL client BOs when forever mode is enabled.
+	 * Firmware may DMA-read any of them (instruction buffers, I/O data,
+	 * etc.) and the driver isn't told which BOs the workload uses.
+	 * Re-pin on each submit to capture any BOs created since last submit.
 	 */
-	if (nhwctx->hwctx_config[0].forever_mode_enabled && !nhwctx->forever_cmd_bo) {
-		drm_gem_object_get(to_gobj(job->cmd_bo));
-		nhwctx->forever_cmd_bo = job->cmd_bo;
+	if (nhwctx->hwctx_config[0].forever_mode_enabled) {
+		struct drm_file *filp = hwctx->client->filp;
+		struct drm_gem_object *obj;
+		u32 bo_count = 0;
+		int handle;
 
-		if (job->bo_cnt > 0) {
-			nhwctx->forever_arg_bos = kcalloc(job->bo_cnt,
-							   sizeof(*nhwctx->forever_arg_bos),
+		/* Log BOs passed with this submission */
+		XDNA_INFO(xdna, "[FOREVER_PIN] submit: cmd_bo hdl=%u addr=0x%llx, arg_bo_cnt=%zu",
+			  op == ERT_CMD_CHAIN ? 0 : 0, /* hdl not available here */
+			  amdxdna_gem_dev_addr(job->cmd_bo), job->bo_cnt);
+		for (u32 i = 0; i < job->bo_cnt; i++) {
+			struct amdxdna_gem_obj *abo = to_xdna_obj(job->bos[i].obj);
+
+			XDNA_INFO(xdna, "[FOREVER_PIN] submit: arg_bo[%u] addr=0x%llx",
+				  i, amdxdna_gem_dev_addr(abo));
+		}
+
+		/* Release previous refs if re-pinning */
+		ve2_forever_release_bo_refs(nhwctx);
+
+		/* Count BOs */
+		spin_lock(&filp->table_lock);
+		idr_for_each_entry(&filp->object_idr, obj, handle)
+			bo_count++;
+		spin_unlock(&filp->table_lock);
+
+		if (bo_count > 0) {
+			nhwctx->forever_bo_refs = kcalloc(bo_count,
+							   sizeof(*nhwctx->forever_bo_refs),
 							   GFP_KERNEL);
-			if (nhwctx->forever_arg_bos) {
-				nhwctx->forever_arg_bo_cnt = job->bo_cnt;
-				for (u32 i = 0; i < job->bo_cnt; i++) {
-					drm_gem_object_get(job->bos[i].obj);
-					nhwctx->forever_arg_bos[i] =
-						to_xdna_obj(job->bos[i].obj);
+			if (nhwctx->forever_bo_refs) {
+				u32 i = 0;
+
+				spin_lock(&filp->table_lock);
+				idr_for_each_entry(&filp->object_idr, obj, handle) {
+					if (i >= bo_count)
+						break;
+					drm_gem_object_get(obj);
+					nhwctx->forever_bo_refs[i++] = obj;
+					XDNA_INFO(xdna, "[FOREVER_PIN] extra ref on BO hdl=%d obj=%p refcnt=%u",
+						  handle, obj, kref_read(&obj->refcount));
 				}
+				spin_unlock(&filp->table_lock);
+				nhwctx->forever_bo_ref_cnt = i;
 			}
 		}
+
+		XDNA_INFO(xdna, "[FOREVER_PIN] pinned %u client BOs for forever mode",
+			  nhwctx->forever_bo_ref_cnt);
 	}
 
 	return 0;
@@ -1608,7 +1640,7 @@ void ve2_hwctx_fini(struct amdxdna_ctx *hwctx)
 			/*
 			 * DON'T free:
 			 * - HSA queue (firmware reads/writes it)
-			 * - BOs (firmware reads instruction buffer)
+			 * - BOs (extra refs taken at submit time)
 			 * - Partition (firmware uses handshake memory)
 			 * - Context structures (needed for later reclaim)
 			 */
@@ -1697,20 +1729,15 @@ static int ve2_update_handshake_pkt(struct amdxdna_ctx *hwctx, u8 buf_type, u64 
 	return 0;
 }
 
-/* Release the extra BO references taken for forever mode DMA pinning. */
+/* Release the extra BO references taken at submit time for forever mode. */
 static void ve2_forever_release_bo_refs(struct amdxdna_ctx_priv *nhwctx)
 {
-	if (nhwctx->forever_cmd_bo) {
-		drm_gem_object_put(to_gobj(nhwctx->forever_cmd_bo));
-		nhwctx->forever_cmd_bo = NULL;
-	}
+	for (u32 i = 0; i < nhwctx->forever_bo_ref_cnt; i++)
+		drm_gem_object_put(nhwctx->forever_bo_refs[i]);
 
-	for (u32 i = 0; i < nhwctx->forever_arg_bo_cnt; i++)
-		drm_gem_object_put(to_gobj(nhwctx->forever_arg_bos[i]));
-
-	kfree(nhwctx->forever_arg_bos);
-	nhwctx->forever_arg_bos = NULL;
-	nhwctx->forever_arg_bo_cnt = 0;
+	kfree(nhwctx->forever_bo_refs);
+	nhwctx->forever_bo_refs = NULL;
+	nhwctx->forever_bo_ref_cnt = 0;
 }
 
 static void ve2_hwctx_config_op_timeout(struct amdxdna_ctx *hwctx, u32 op_timeout)
