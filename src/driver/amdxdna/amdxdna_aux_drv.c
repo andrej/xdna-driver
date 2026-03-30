@@ -32,6 +32,7 @@ static int amdxdna_aux_probe(struct auxiliary_device *auxdev,
 	INIT_LIST_HEAD(&xdna->client_list);
 	INIT_LIST_HEAD(&xdna->detached_forever_ctxs);
 	mutex_init(&xdna->detached_lock);
+	xdna->next_detached_id = AMDXDNA_MAX_CTX_ID + 1;
 	auxiliary_set_drvdata(auxdev, xdna);
 
 	mutex_lock(&xdna->dev_lock);
