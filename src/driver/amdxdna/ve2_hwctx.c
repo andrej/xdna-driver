@@ -13,6 +13,8 @@
 #include "ve2_mgmt.h"
 #include "ve2_res_solver.h"
 
+static void ve2_forever_release_bo_refs(struct amdxdna_ctx_priv *nhwctx);
+
 int enable_polling;
 module_param(enable_polling, int, 0644);
 MODULE_PARM_DESC(enable_polling, "Enable polling mode. Polling mode disabled by default.");
@@ -942,6 +944,31 @@ int ve2_cmd_submit(struct amdxdna_ctx *hwctx, struct amdxdna_sched_job *job, u32
 		 hwctx, *seq, hwctx->submitted);
 	ve2_mgmt_schedule_cmd(xdna, hwctx);
 
+	/*
+	 * Pin BOs that firmware will continue to access in forever mode.
+	 * The job holding these refs gets released during cmd_wait (first
+	 * iteration complete), but firmware keeps DMA-ing from these buffers.
+	 * Take extra refs here so the DMA memory survives process exit.
+	 */
+	if (nhwctx->hwctx_config[0].forever_mode_enabled && !nhwctx->forever_cmd_bo) {
+		drm_gem_object_get(to_gobj(job->cmd_bo));
+		nhwctx->forever_cmd_bo = job->cmd_bo;
+
+		if (job->bo_cnt > 0) {
+			nhwctx->forever_arg_bos = kcalloc(job->bo_cnt,
+							   sizeof(*nhwctx->forever_arg_bos),
+							   GFP_KERNEL);
+			if (nhwctx->forever_arg_bos) {
+				nhwctx->forever_arg_bo_cnt = job->bo_cnt;
+				for (u32 i = 0; i < job->bo_cnt; i++) {
+					drm_gem_object_get(job->bos[i].obj);
+					nhwctx->forever_arg_bos[i] =
+						to_xdna_obj(job->bos[i].obj);
+				}
+			}
+		}
+	}
+
 	return 0;
 }
 
@@ -1349,29 +1376,6 @@ void ve2_hwctx_fini(struct amdxdna_ctx *hwctx)
 				  "Forever mode active (iter=%u), detaching context %s instead of destroying",
 				  forever_iter, hwctx->name);
 
-			/* Do SAFE cleanup only - no memory deallocation */
-			if (enable_polling)
-				del_timer_sync(&hwctx->priv->event_timer);
-
-			/*
-			 * Keep active_ctx pointing to this context (firmware still using it).
-			 * Don't clear it - harmless if IRQ fires (wake_up on empty waitqueue does nothing).
-			 */
-			mgmtctx = &xdna->dev_handle->ve2_mgmtctx[nhwctx->start_col];
-			mutex_lock(&mgmtctx->ctx_lock);
-			ve2_fifo_remove_ctx(mgmtctx, hwctx);
-			mutex_unlock(&mgmtctx->ctx_lock);
-
-			/* Cancel pending scheduler work */
-			if (mgmtctx->mgmtctx_workq)
-				cancel_work_sync(&mgmtctx->sched_work);
-
-			/* Mark as detached and add to global tracking list */
-			nhwctx->forever_mode_detached = true;
-			mutex_lock(&xdna->detached_lock);
-			list_add_tail(&hwctx->detached_list_node, &xdna->detached_forever_ctxs);
-			mutex_unlock(&xdna->detached_lock);
-
 			XDNA_INFO(xdna,
 				  "Context %s detached. Memory kept alive for firmware. "
 				  "Use sysfs forever_mode_stop to reclaim resources.",
@@ -1387,6 +1391,9 @@ void ve2_hwctx_fini(struct amdxdna_ctx *hwctx)
 			return;  /* Exit early without cleanup */
 		}
 	}
+
+	/* Release forever mode BO refs if they were taken */
+	ve2_forever_release_bo_refs(nhwctx);
 
 	/*
 	 * Release jobs first to decrement BO refcounts, but they may not
@@ -1452,6 +1459,22 @@ static int ve2_update_handshake_pkt(struct amdxdna_ctx *hwctx, u8 buf_type, u64 
 	}
 
 	return 0;
+}
+
+/* Release the extra BO references taken for forever mode DMA pinning. */
+static void ve2_forever_release_bo_refs(struct amdxdna_ctx_priv *nhwctx)
+{
+	if (nhwctx->forever_cmd_bo) {
+		drm_gem_object_put(to_gobj(nhwctx->forever_cmd_bo));
+		nhwctx->forever_cmd_bo = NULL;
+	}
+
+	for (u32 i = 0; i < nhwctx->forever_arg_bo_cnt; i++)
+		drm_gem_object_put(to_gobj(nhwctx->forever_arg_bos[i]));
+
+	kfree(nhwctx->forever_arg_bos);
+	nhwctx->forever_arg_bos = NULL;
+	nhwctx->forever_arg_bo_cnt = 0;
 }
 
 static void ve2_hwctx_config_op_timeout(struct amdxdna_ctx *hwctx, u32 op_timeout)
@@ -1571,6 +1594,9 @@ stopped:
 						   sizeof(u32), &val);
 	}
 
+	/* Release extra BO refs now that firmware has stopped DMA-ing */
+	ve2_forever_release_bo_refs(nhwctx);
+
 	XDNA_INFO(xdna, "Forever mode stopped for context %s (device released for new contexts)",
 		  hwctx->name);
 
@@ -1605,7 +1631,7 @@ void ve2_hwctx_reclaim_detached(struct amdxdna_dev *xdna, struct amdxdna_ctx *hw
 
 	/* Remove from detached list (caller must hold detached_lock) */
 	list_del(&hwctx->detached_list_node);
-	nhwctx->forever_mode_detached = false;
+	hwctx->forever_mode_detached = false;
 
 	/* Clear active_ctx pointer in mgmtctx */
 	mutex_lock(&mgmtctx->ctx_lock);
