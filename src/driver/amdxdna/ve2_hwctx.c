@@ -10,6 +10,7 @@
 
 #include "amdxdna_ctx.h"
 #include "amdxdna_gem.h"
+#include "amdxdna_sysfs.h"
 #include "ve2_of.h"
 #include "ve2_mgmt.h"
 #include "ve2_res_solver.h"
@@ -1632,6 +1633,9 @@ void ve2_hwctx_fini(struct amdxdna_ctx *hwctx)
 			list_add_tail(&hwctx->detached_list_node, &xdna->detached_forever_ctxs);
 			mutex_unlock(&xdna->detached_lock);
 
+			/* Expose pinned BO addresses via sysfs */
+			amdxdna_sysfs_create_forever_ctx(xdna, hwctx);
+
 			XDNA_INFO(xdna,
 				  "Context %s detached as detached_id=%u. Memory kept alive for firmware. "
 				  "Use sysfs forever_mode_stop to reclaim resources.",
@@ -1891,6 +1895,9 @@ void ve2_hwctx_reclaim_detached(struct amdxdna_dev *xdna, struct amdxdna_ctx *hw
 
 	XDNA_INFO(xdna, "Reclaiming detached context %s (start_col=%u, num_col=%u)",
 		  hwctx->name, nhwctx->start_col, nhwctx->num_col);
+
+	/* Remove sysfs directory before freeing resources */
+	amdxdna_sysfs_remove_forever_ctx(hwctx);
 
 	/* Remove from detached list (caller must hold detached_lock) */
 	list_del(&hwctx->detached_list_node);
