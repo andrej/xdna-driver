@@ -437,7 +437,7 @@ u64 amdxdna_gem_uva(struct amdxdna_gem_obj *abo)
 u64 amdxdna_gem_dev_addr(struct amdxdna_gem_obj *abo)
 {
 	if (abo->type == AMDXDNA_BO_DEV_HEAP)
-		return abo->client->xdna->dev_info->dev_mem_base;
+		return abo->client->xdna->runtime_dev_mem_base;
 	if (abo->type == AMDXDNA_BO_DEV)
 		return abo->mm_node.start;
 	if (iommu_mode == AMDXDNA_IOMMU_NO_PASID)
@@ -893,7 +893,6 @@ amdxdna_gem_create_cma_object(struct drm_device *dev, struct amdxdna_drm_create_
 		XDNA_ERR(xdna, "Invalid BO size 0x%llx", args->size);
 		return ERR_PTR(-EINVAL);
 	}
-
 	dma_buf = amdxdna_get_cma_buf_with_fallback(xdna->cma_region_devs,
 						    MAX_MEM_REGIONS,
 						    dev->dev, size,
@@ -1067,7 +1066,16 @@ amdxdna_drm_create_dev_heap_bo(struct drm_device *dev,
 	client->dev_heap = abo;
 	drm_gem_object_get(to_gobj(abo));
 
-	drm_mm_init(&abo->mm, xdna->dev_info->dev_mem_base, abo->mem.size);
+#ifdef AMDXDNA_DEVEL
+	if (amdxdna_use_cma() && abo->mem.dma_addr) {
+		xdna->runtime_dev_mem_base = abo->mem.dma_addr;
+		drm_mm_init(&abo->mm, abo->mem.dma_addr, abo->mem.size);
+	} else
+#endif
+	{
+		xdna->runtime_dev_mem_base = xdna->dev_info->dev_mem_base;
+		drm_mm_init(&abo->mm, xdna->dev_info->dev_mem_base, abo->mem.size);
+	}
 
 	mutex_unlock(&client->mm_lock);
 
@@ -1139,6 +1147,34 @@ int amdxdna_drm_create_bo_ioctl(struct drm_device *dev, void *data, struct drm_f
 		break;
 	case AMDXDNA_BO_DEV:
 		abo = amdxdna_drm_create_dev_bo(dev, args, filp);
+		break;
+	case AMDXDNA_BO_FIXED_ADDR:
+		if (!args->vaddr || !args->size) {
+			XDNA_ERR(xdna, "FIXED_ADDR BO requires vaddr (phys) and size");
+			ret = -EINVAL;
+			goto out;
+		}
+		{
+			struct drm_gem_object *gobj;
+			struct dma_buf *dma_buf;
+
+			dma_buf = amdxdna_get_fixed_addr_buf(dev->dev,
+							     (phys_addr_t)args->vaddr,
+							     args->size);
+			if (IS_ERR(dma_buf)) {
+				ret = PTR_ERR(dma_buf);
+				goto out;
+			}
+			gobj = dev->driver->gem_prime_import(dev, dma_buf);
+			dma_buf_put(dma_buf);
+			if (IS_ERR(gobj)) {
+				ret = PTR_ERR(gobj);
+				goto out;
+			}
+			abo = to_xdna_obj(gobj);
+			abo->client = filp->driver_priv;
+			abo->type = AMDXDNA_BO_SHARE;
+		}
 		break;
 	default:
 		ret = -EINVAL;

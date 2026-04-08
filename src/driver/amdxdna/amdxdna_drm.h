@@ -175,6 +175,8 @@ struct amdxdna_dev {
 	struct list_head		detached_forever_ctxs;
 	struct mutex			detached_lock;
 	u32				next_detached_id;
+
+	u64				runtime_dev_mem_base;
 };
 
 struct amdxdna_stats {

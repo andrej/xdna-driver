@@ -5,6 +5,7 @@
 
 #include <linux/kernel.h>
 #include <linux/dma-buf.h>
+#include <linux/io.h>
 #include "amdxdna_cma_buf.h"
 
 struct amdxdna_cmabuf_priv {
@@ -13,6 +14,7 @@ struct amdxdna_cmabuf_priv {
 	void *cpu_addr;
 	size_t size;
 	bool cacheable;
+	bool is_fixed;  /* true = fixed physical addr (memremap), false = CMA */
 };
 
 static struct sg_table *
@@ -86,8 +88,14 @@ static void amdxdna_cmabuf_release(struct dma_buf *dbuf)
 
 	if (!cmabuf)
 		return;
-	amdxdna_cmabuf_free(cmabuf->dev, cmabuf->cpu_addr, cmabuf->dma_addr,
-			    cmabuf->size, cmabuf->cacheable);
+
+	if (cmabuf->is_fixed) {
+		if (cmabuf->cpu_addr)
+			memunmap(cmabuf->cpu_addr);
+	} else {
+		amdxdna_cmabuf_free(cmabuf->dev, cmabuf->cpu_addr, cmabuf->dma_addr,
+				    cmabuf->size, cmabuf->cacheable);
+	}
 	kfree(cmabuf);
 	dbuf->priv = NULL;
 }
@@ -114,10 +122,24 @@ static int amdxdna_cmabuf_mmap(struct dma_buf *dbuf, struct vm_area_struct *vma)
 				  cmabuf->dma_addr,
 				  cmabuf->size);
 	else
-		ret = dma_mmap_coherent(cmabuf->dev, vma,
-					cmabuf->cpu_addr,
-					cmabuf->dma_addr,
-					cmabuf->size);
+	if (cmabuf->is_fixed) {
+		/* Fixed-address buffer: use remap_pfn_range with WC caching */
+		vma->vm_page_prot = pgprot_writecombine(vma->vm_page_prot);
+		ret = remap_pfn_range(vma, vma->vm_start,
+				      cmabuf->dma_addr >> PAGE_SHIFT,
+				      size, vma->vm_page_prot);
+	} else {
+		if (cmabuf->cacheable)
+			ret = dma_mmap_wc(cmabuf->dev, vma,
+					  cmabuf->cpu_addr,
+					  cmabuf->dma_addr,
+					  cmabuf->size);
+		else
+			ret = dma_mmap_coherent(cmabuf->dev, vma,
+						cmabuf->cpu_addr,
+						cmabuf->dma_addr,
+						cmabuf->size);
+	}
 
 	vma->vm_pgoff = vm_pgoff;
 
@@ -171,6 +193,7 @@ static struct dma_buf *amdxdna_get_cma_buf(struct device *dev,
 	cmabuf->dma_addr = dma_addr;
 	cmabuf->size = size;
 	cmabuf->cacheable = cacheable;
+	cmabuf->is_fixed = false;
 
 	exp_info.size = size;
 	exp_info.ops = &amdxdna_cmabuf_dmabuf_ops;
@@ -187,6 +210,69 @@ static struct dma_buf *amdxdna_get_cma_buf(struct device *dev,
 
 free_dma:
 	amdxdna_cmabuf_free(dev, cpu_addr, dma_addr, size, cacheable);
+free_cmabuf:
+	kfree(cmabuf);
+	return ERR_PTR(ret);
+}
+
+/**
+ * amdxdna_get_fixed_addr_buf - Create a dma_buf wrapping a known physical address
+ * @dev: Device (for dma_map_resource in sg_table)
+ * @phys: Physical address of the pre-allocated region
+ * @size: Size of the region in bytes
+ *
+ * This creates a dma_buf that references an already-allocated physical memory
+ * region (e.g., a DTS reserved-memory region).  The CPU mapping uses memremap()
+ * and the DMA address is set to @phys directly (no IOMMU translation).
+ * The caller is responsible for ensuring @phys points to a valid reserved region.
+ *
+ * Returns: dma_buf on success, ERR_PTR on failure.
+ */
+struct dma_buf *amdxdna_get_fixed_addr_buf(struct device *dev, phys_addr_t phys,
+					   size_t size)
+{
+	struct amdxdna_cmabuf_priv *cmabuf;
+	struct dma_buf *dbuf;
+	int ret;
+	DEFINE_DMA_BUF_EXPORT_INFO(exp_info);
+
+	cmabuf = kzalloc(sizeof(*cmabuf), GFP_KERNEL);
+	if (!cmabuf)
+		return ERR_PTR(-ENOMEM);
+
+	size = PAGE_ALIGN(size);
+
+	cmabuf->cpu_addr = memremap(phys, size, MEMREMAP_WC);
+	if (!cmabuf->cpu_addr) {
+		pr_err("amdxdna: fixed_addr_buf: memremap(0x%llx, %zu) failed\n",
+		       (u64)phys, size);
+		ret = -ENOMEM;
+		goto free_cmabuf;
+	}
+
+	cmabuf->dev = dev;
+	cmabuf->dma_addr = (dma_addr_t)phys;
+	cmabuf->size = size;
+	cmabuf->is_fixed = true;
+	cmabuf->cacheable = true;
+
+	exp_info.size = size;
+	exp_info.ops = &amdxdna_cmabuf_dmabuf_ops;
+	exp_info.priv = cmabuf;
+	exp_info.flags = O_RDWR;
+
+	dbuf = dma_buf_export(&exp_info);
+	if (IS_ERR(dbuf)) {
+		ret = PTR_ERR(dbuf);
+		goto free_map;
+	}
+
+	pr_info("amdxdna: fixed_addr_buf: phys=0x%llx size=%zu cpu=%px\n",
+		(u64)phys, size, cmabuf->cpu_addr);
+	return dbuf;
+
+free_map:
+	memunmap(cmabuf->cpu_addr);
 free_cmabuf:
 	kfree(cmabuf);
 	return ERR_PTR(ret);

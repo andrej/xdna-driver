@@ -220,6 +220,76 @@ static ssize_t forever_mode_stop_store(struct device *dev,
 }
 static DEVICE_ATTR_WO(forever_mode_stop);
 
+/*
+ * Ping-pong configuration for forever mode.
+ * Format: "ctx_id arg_index buf_b_addr flag_ddr_addr"
+ * Example: echo "0 1 0x77400000 0x70048000" > forever_mode_pingpong
+ * Set arg_index=0 buf_b_addr=0 flag_ddr_addr=0 to disable.
+ */
+static ssize_t forever_mode_pingpong_store(struct device *dev,
+					    struct device_attribute *attr,
+					    const char *buf, size_t count)
+{
+	struct amdxdna_dev *xdna = dev_get_drvdata(dev);
+	struct amdxdna_client *client;
+	struct amdxdna_ctx *ctx;
+	struct amdxdna_ctx_priv *nhwctx;
+	unsigned int ctx_id, arg_index;
+	u32 buf_b_addr, flag_ddr_addr, enabled;
+	int ret, idx;
+
+	ret = sscanf(buf, "%u %u %x %x", &ctx_id, &arg_index,
+		     &buf_b_addr, &flag_ddr_addr);
+	if (ret != 4) {
+		XDNA_ERR(xdna, "Usage: echo 'ctx_id arg_idx buf_b_addr flag_addr' > forever_mode_pingpong");
+		return -EINVAL;
+	}
+
+	enabled = (buf_b_addr != 0) ? 1 : 0;
+
+	mutex_lock(&xdna->dev_lock);
+	client = list_first_entry_or_null(&xdna->client_list,
+					  struct amdxdna_client, node);
+	if (!client) {
+		mutex_unlock(&xdna->dev_lock);
+		return -ENODEV;
+	}
+
+	idx = srcu_read_lock(&client->ctx_srcu);
+	ctx = xa_load(&client->ctx_xa, ctx_id);
+	if (!ctx) {
+		srcu_read_unlock(&client->ctx_srcu, idx);
+		mutex_unlock(&xdna->dev_lock);
+		return -EINVAL;
+	}
+
+	nhwctx = ctx->priv;
+	for (u32 col = 0; col < ctx->num_col; col++) {
+		ve2_partition_write_privileged_mem(nhwctx->aie_dev, col,
+			offsetof(struct handshake, pp_enabled),
+			sizeof(u32), &enabled);
+		ve2_partition_write_privileged_mem(nhwctx->aie_dev, col,
+			offsetof(struct handshake, pp_arg_index),
+			sizeof(u32), &arg_index);
+		ve2_partition_write_privileged_mem(nhwctx->aie_dev, col,
+			offsetof(struct handshake, pp_buf_b_addr_lo),
+			sizeof(u32), &buf_b_addr);
+		ve2_partition_write_privileged_mem(nhwctx->aie_dev, col,
+			offsetof(struct handshake, pp_flag_ddr_addr_lo),
+			sizeof(u32), &flag_ddr_addr);
+	}
+
+	srcu_read_unlock(&client->ctx_srcu, idx);
+	mutex_unlock(&xdna->dev_lock);
+
+	XDNA_INFO(xdna, "Pingpong %s ctx %u: arg[%u] buf_b=0x%08x flag=0x%08x",
+		  enabled ? "enabled" : "disabled", ctx_id, arg_index,
+		  buf_b_addr, flag_ddr_addr);
+
+	return count;
+}
+static DEVICE_ATTR_WO(forever_mode_pingpong);
+
 static ssize_t forever_mode_status_show(struct device *dev,
 					 struct device_attribute *attr,
 					 char *buf)
@@ -283,6 +353,7 @@ static struct attribute *amdxdna_attrs[] = {
 	&dev_attr_forever_mode_default.attr,
 	&dev_attr_forever_mode_enable.attr,
 	&dev_attr_forever_mode_stop.attr,
+	&dev_attr_forever_mode_pingpong.attr,
 	&dev_attr_forever_mode_status.attr,
 	NULL,
 };
