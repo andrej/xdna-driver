@@ -6,6 +6,7 @@
 #include "amdxdna_ctx.h"
 #include "amdxdna_gem.h"
 #include "ve2_of.h"
+#include "ve2_mgmt.h"
 
 static ssize_t vbnv_show(struct device *dev, struct device_attribute *attr, char *buf)
 {
