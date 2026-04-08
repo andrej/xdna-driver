@@ -305,8 +305,25 @@ struct handshake {
 	u32 forever_stop_request;     // 74 - Driver sets to request stop
 	u32 forever_iteration;        // 78 - FW updates current iteration (read-only)
 	u32 forever_last_status;      // 7c - FW updates last status (read-only)
-	u32 runlist_read_idx;         // 80 relative read index in the runlist
-	u32 reserved1[3];             // 84-8c (make sure vm (below) starts at offset 0xa0)
+	/*
+	 * Offsets 0x80-0x8c are reinterpreted depending on the firmware build:
+	 *  - forever firmware: ping-pong double-buffer control (pp_*)
+	 *  - 6.2 VE2 firmware: runlist_read_idx (+ padding)
+	 * Union keeps both ABIs at the same offset so all driver code compiles;
+	 * the running firmware determines which interpretation is live.
+	 */
+	union {
+		struct {
+			u32 pp_enabled;          // 80 - Driver sets to enable ping-pong input swap
+			u32 pp_arg_index;        // 84 - Which arg index is the input BO
+			u32 pp_buf_b_addr_lo;    // 88 - Alternate buffer physical address
+			u32 pp_flag_ddr_addr_lo; // 8c - DDR flag address written by DMA hardware
+		};
+		struct {
+			u32 runlist_read_idx;    // 80 relative read index in the runlist (6.2 VE2 fw)
+			u32 reserved1[3];        // 84-8c (make sure vm (below) starts at offset 0xa0)
+		};
+	};
 	u32 last_ddr_dm2mm_addr_high; // 90
 	u32 last_ddr_dm2mm_addr_low; // 94
 	u32 last_ddr_mm2dm_addr_high; // 98
