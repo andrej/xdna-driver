@@ -294,6 +294,7 @@ struct amdxdna_drm_create_bo {
 #define	AMDXDNA_BO_DEV_HEAP	2 /* Shared host memory to device as heap memory */
 #define	AMDXDNA_BO_DEV		3 /* Allocated from BO_DEV_HEAP */
 #define	AMDXDNA_BO_CMD		4 /* Same as share BO, used only by XRT internally */
+#define	AMDXDNA_BO_FIXED_ADDR	5 /* BO at a fixed physical address (vaddr = phys addr) */
 	__u32	type;
 	__u32	handle;
 };

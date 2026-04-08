@@ -191,7 +191,10 @@ struct handshake {
 	u32 forever_stop_request;     // 74 - Driver sets to request stop
 	u32 forever_iteration;        // 78 - FW updates current iteration (read-only)
 	u32 forever_last_status;      // 7c - FW updates last status (read-only)
-	u32 reserved1[4];             // 80-8c (make sure vm (below) starts at offset 0xa0)
+	u32 pp_enabled;               // 80 - Driver sets to enable ping-pong input swap
+	u32 pp_arg_index;             // 84 - Which arg index is the input BO
+	u32 pp_buf_b_addr_lo;         // 88 - Alternate buffer physical address
+	u32 pp_flag_ddr_addr_lo;      // 8c - DDR flag address written by DMA hardware
 	u32 last_ddr_dm2mm_addr_high; // 90
 	u32 last_ddr_dm2mm_addr_low; // 94
 	u32 last_ddr_mm2dm_addr_high; // 98
