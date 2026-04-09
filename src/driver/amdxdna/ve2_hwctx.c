@@ -1421,7 +1421,7 @@ int ve2_hwctx_init(struct amdxdna_ctx *hwctx)
 
 cleanup_xrs:
 	/* Releases XRS and partition (ve2_mgmt_destroy_partition calls ve2_xrs_release). */
-	ve2_mgmt_destroy_partition(hwctx);
+	ve2_mgmt_destroy_partition(xdna, hwctx);
 cleanup_priv:
 	kfree(hwctx->priv);
 

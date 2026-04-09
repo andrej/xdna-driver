@@ -933,7 +933,6 @@ static void ve2_dump_debug_state(struct amdxdna_dev *xdna,
 	XDNA_WARN(xdna, "  ctx_switch_req:     0x%x\n", hs->ctx_switch_req);
 	XDNA_WARN(xdna, "  cert_idle_status:   0x%x\n", hs->cert_idle_status);
 	XDNA_WARN(xdna, "  misc_status:        0x%x\n", hs->misc_status);
-	XDNA_WARN(xdna, "  completion_status:  0x%x\n", hs->completion_status);
 	XDNA_WARN(xdna, "  doorbell_pending:   %u\n", hs->doorbell_pending);
 
 	/* Dump VM state (firmware execution context) */
