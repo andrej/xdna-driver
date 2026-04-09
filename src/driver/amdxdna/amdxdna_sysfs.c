@@ -160,6 +160,8 @@ static ssize_t forever_mode_stop_store(struct device *dev,
 	mutex_lock(&xdna->detached_lock);
 	list_for_each_entry(ctx, &xdna->detached_forever_ctxs, detached_list_node) {
 		if (ctx->id == ctx_id) {
+			struct amdxdna_client *zombie;
+
 			XDNA_INFO(xdna, "Found detached context %u, stopping and reclaiming", ctx_id);
 			was_detached = true;
 
@@ -172,14 +174,17 @@ static ssize_t forever_mode_stop_store(struct device *dev,
 				return ret;
 			}
 
-			/* Firmware has stopped, safe to reclaim all resources */
-			ve2_hwctx_reclaim_detached(xdna, ctx);
-
-			/* Free the context structure itself */
-			kfree(ctx->name);
-			kfree(ctx);
-
+			/*
+			 * Firmware has stopped, safe to reclaim all resources.
+			 * reclaim frees ctx (and ctx->name) and returns the
+			 * zombie client if deferred close is needed.
+			 */
+			zombie = ve2_hwctx_reclaim_detached(xdna, ctx);
 			mutex_unlock(&xdna->detached_lock);
+
+			/* Deferred client cleanup outside detached_lock */
+			if (zombie)
+				amdxdna_client_deferred_close(zombie);
 
 			XDNA_INFO(xdna, "Detached context %u stopped and reclaimed", ctx_id);
 			return count;
@@ -233,7 +238,7 @@ static ssize_t forever_mode_pingpong_store(struct device *dev,
 {
 	struct amdxdna_dev *xdna = dev_get_drvdata(dev);
 	struct amdxdna_client *client;
-	struct amdxdna_ctx *ctx;
+	struct amdxdna_ctx *ctx = NULL;
 	struct amdxdna_ctx_priv *nhwctx;
 	unsigned int ctx_id, arg_index;
 	u32 buf_b_addr, flag_ddr_addr, enabled;
@@ -248,11 +253,51 @@ static ssize_t forever_mode_pingpong_store(struct device *dev,
 
 	enabled = (buf_b_addr != 0) ? 1 : 0;
 
+	/*
+	 * Search detached forever contexts first (the common case when
+	 * the application has exited and the context is orphaned).
+	 */
+	mutex_lock(&xdna->detached_lock);
+	{
+		struct amdxdna_ctx *c;
+
+		list_for_each_entry(c, &xdna->detached_forever_ctxs,
+				    detached_list_node) {
+			if (c->id == ctx_id) {
+				ctx = c;
+				break;
+			}
+		}
+	}
+
+	if (ctx) {
+		nhwctx = ctx->priv;
+		for (u32 col = 0; col < ctx->num_col; col++) {
+			ve2_partition_write_privileged_mem(nhwctx->aie_dev, col,
+				offsetof(struct handshake, pp_enabled),
+				sizeof(u32), &enabled);
+			ve2_partition_write_privileged_mem(nhwctx->aie_dev, col,
+				offsetof(struct handshake, pp_arg_index),
+				sizeof(u32), &arg_index);
+			ve2_partition_write_privileged_mem(nhwctx->aie_dev, col,
+				offsetof(struct handshake, pp_buf_b_addr_lo),
+				sizeof(u32), &buf_b_addr);
+			ve2_partition_write_privileged_mem(nhwctx->aie_dev, col,
+				offsetof(struct handshake, pp_flag_ddr_addr_lo),
+				sizeof(u32), &flag_ddr_addr);
+		}
+		mutex_unlock(&xdna->detached_lock);
+		goto done;
+	}
+	mutex_unlock(&xdna->detached_lock);
+
+	/* Fall back to searching active client contexts */
 	mutex_lock(&xdna->dev_lock);
 	client = list_first_entry_or_null(&xdna->client_list,
 					  struct amdxdna_client, node);
 	if (!client) {
 		mutex_unlock(&xdna->dev_lock);
+		XDNA_ERR(xdna, "Pingpong: no client or detached ctx %u found", ctx_id);
 		return -ENODEV;
 	}
 
@@ -261,6 +306,7 @@ static ssize_t forever_mode_pingpong_store(struct device *dev,
 	if (!ctx) {
 		srcu_read_unlock(&client->ctx_srcu, idx);
 		mutex_unlock(&xdna->dev_lock);
+		XDNA_ERR(xdna, "Pingpong: ctx %u not found", ctx_id);
 		return -EINVAL;
 	}
 
@@ -283,6 +329,7 @@ static ssize_t forever_mode_pingpong_store(struct device *dev,
 	srcu_read_unlock(&client->ctx_srcu, idx);
 	mutex_unlock(&xdna->dev_lock);
 
+done:
 	XDNA_INFO(xdna, "Pingpong %s ctx %u: arg[%u] buf_b=0x%08x flag=0x%08x",
 		  enabled ? "enabled" : "disabled", ctx_id, arg_index,
 		  buf_b_addr, flag_ddr_addr);
@@ -347,6 +394,66 @@ static ssize_t forever_mode_status_show(struct device *dev,
 }
 static DEVICE_ATTR_RO(forever_mode_status);
 
+/*
+ * Ping-pong pre-configuration for forever mode.
+ * Set BEFORE starting the application so the driver writes pp config
+ * to the firmware handshake during context init (before exec_buf).
+ * The firmware caches pp_enabled once at do_forever_loop() entry,
+ * so it must be written before the first exec_buf is dispatched.
+ *
+ * Format: "arg_index buf_b_addr flag_ddr_addr"
+ * Example: echo "1 0x77400000 0x70048000" > forever_mode_pingpong_preconfig
+ * To disable: echo "0" > forever_mode_pingpong_preconfig
+ */
+static ssize_t forever_mode_pingpong_preconfig_show(struct device *dev,
+						     struct device_attribute *attr,
+						     char *buf)
+{
+	struct amdxdna_dev *xdna = dev_get_drvdata(dev);
+
+	if (!xdna->pp_preconfig_enabled)
+		return sprintf(buf, "disabled\n");
+
+	return sprintf(buf, "arg[%u] buf_b=0x%08x flag=0x%08x\n",
+		       xdna->pp_preconfig_arg_index,
+		       xdna->pp_preconfig_buf_b_addr,
+		       xdna->pp_preconfig_flag_ddr_addr);
+}
+
+static ssize_t forever_mode_pingpong_preconfig_store(struct device *dev,
+						      struct device_attribute *attr,
+						      const char *buf, size_t count)
+{
+	struct amdxdna_dev *xdna = dev_get_drvdata(dev);
+	unsigned int arg_index;
+	u32 buf_b_addr, flag_ddr_addr;
+	int ret;
+
+	/* "0" disables preconfig */
+	if (sysfs_streq(buf, "0")) {
+		xdna->pp_preconfig_enabled = false;
+		XDNA_INFO(xdna, "Pingpong preconfig disabled");
+		return count;
+	}
+
+	ret = sscanf(buf, "%u %x %x", &arg_index, &buf_b_addr, &flag_ddr_addr);
+	if (ret != 3) {
+		XDNA_ERR(xdna, "Usage: echo 'arg_idx buf_b_addr flag_addr' > forever_mode_pingpong_preconfig");
+		return -EINVAL;
+	}
+
+	xdna->pp_preconfig_arg_index = arg_index;
+	xdna->pp_preconfig_buf_b_addr = buf_b_addr;
+	xdna->pp_preconfig_flag_ddr_addr = flag_ddr_addr;
+	xdna->pp_preconfig_enabled = true;
+
+	XDNA_INFO(xdna, "Pingpong preconfig set: arg[%u] buf_b=0x%08x flag=0x%08x",
+		  arg_index, buf_b_addr, flag_ddr_addr);
+
+	return count;
+}
+static DEVICE_ATTR_RW(forever_mode_pingpong_preconfig);
+
 static struct attribute *amdxdna_attrs[] = {
 	&dev_attr_device_type.attr,
 	&dev_attr_vbnv.attr,
@@ -355,6 +462,7 @@ static struct attribute *amdxdna_attrs[] = {
 	&dev_attr_forever_mode_enable.attr,
 	&dev_attr_forever_mode_stop.attr,
 	&dev_attr_forever_mode_pingpong.attr,
+	&dev_attr_forever_mode_pingpong_preconfig.attr,
 	&dev_attr_forever_mode_status.attr,
 	NULL,
 };

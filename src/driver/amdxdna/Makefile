@@ -72,6 +72,7 @@ $(BUILD_ROOT_DIR): $(SRC_DIR)
 	@$(eval TMP_DIR := $(shell mktemp -d))
 	@mkdir -p $(TMP_DIR)/driver
 	@cp -rs $(SRC_DIR) $(TMP_DIR)/driver
+	@if [ -d $(SRC_DIR)/../tools ]; then cp -rs $(SRC_DIR)/../tools $(TMP_DIR)/driver; fi
 	@cp -rs $(SRC_DIR)/../../include $(TMP_DIR)
 	@mv $(TMP_DIR) $(BUILD_ROOT_DIR)
 

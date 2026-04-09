@@ -1550,6 +1550,41 @@ int ve2_hwctx_init(struct amdxdna_ctx *hwctx)
 		ve2_hwctx_config_forever_mode(hwctx, 1);
 		XDNA_INFO(xdna, "Forever mode auto-enabled for hwctx %s (forever_mode_default=1)",
 			  hwctx->name);
+
+		/*
+		 * Pre-write ping-pong config into the firmware handshake
+		 * memory NOW, before any exec_buf can be dispatched.
+		 * The firmware caches pp_enabled once at do_forever_loop()
+		 * entry, so it must already be set when the first exec_buf
+		 * completes and the firmware enters the forever loop.
+		 */
+		if (xdna->pp_preconfig_enabled) {
+			u32 val;
+
+			for (u32 col = 0; col < hwctx->num_col; col++) {
+				val = 1;
+				ve2_partition_write_privileged_mem(priv->aie_dev, col,
+					offsetof(struct handshake, pp_enabled),
+					sizeof(u32), &val);
+				val = xdna->pp_preconfig_arg_index;
+				ve2_partition_write_privileged_mem(priv->aie_dev, col,
+					offsetof(struct handshake, pp_arg_index),
+					sizeof(u32), &val);
+				val = xdna->pp_preconfig_buf_b_addr;
+				ve2_partition_write_privileged_mem(priv->aie_dev, col,
+					offsetof(struct handshake, pp_buf_b_addr_lo),
+					sizeof(u32), &val);
+				val = xdna->pp_preconfig_flag_ddr_addr;
+				ve2_partition_write_privileged_mem(priv->aie_dev, col,
+					offsetof(struct handshake, pp_flag_ddr_addr_lo),
+					sizeof(u32), &val);
+			}
+			XDNA_INFO(xdna, "Pingpong pre-configured for hwctx %s: "
+				  "arg[%u] buf_b=0x%08x flag=0x%08x",
+				  hwctx->name, xdna->pp_preconfig_arg_index,
+				  xdna->pp_preconfig_buf_b_addr,
+				  xdna->pp_preconfig_flag_ddr_addr);
+		}
 	}
 
 	XDNA_DBG(xdna, "hwctx %p initialized: start_col=%u, num_col=%u, queue_addr=0x%llx",
@@ -1615,16 +1650,24 @@ void ve2_hwctx_fini(struct amdxdna_ctx *hwctx)
 	/*
 	 * Check if forever mode is currently running.
 	 * If so, 'detach' the context -- it will be owned by the kernel, not the user application.
+	 *
+	 * We detach when forever mode is enabled AND BOs have been pinned.
+	 * We don't require forever_iteration > 0 because there's a race:
+	 * the ORT session destructor triggers this path immediately after
+	 * the first exec_buf completes (cmd_wait returns), but the firmware
+	 * may not have entered the forever loop yet (iteration still 0).
+	 * The pinned BOs prove the intent to run in forever mode.
 	 */
-	if (nhwctx->hwctx_config && nhwctx->hwctx_config[0].forever_mode_enabled) {
+	if (nhwctx->hwctx_config && nhwctx->hwctx_config[0].forever_mode_enabled &&
+	    nhwctx->forever_bo_ref_cnt > 0) {
 		ve2_partition_read_privileged_mem(nhwctx->aie_dev, 0,
 						  offsetof(struct handshake, forever_iteration),
 						  sizeof(u32), &forever_iter);
 
-		if (forever_iter > 0) {
+		{
 			XDNA_INFO(xdna,
-				  "Forever mode active (iter=%u), detaching context %s instead of destroying",
-				  forever_iter, hwctx->name);
+				  "Forever mode active (iter=%u, pinned_bos=%u), detaching context %s instead of destroying",
+				  forever_iter, nhwctx->forever_bo_ref_cnt, hwctx->name);
 
 			/* Mark as detached and add to global tracking list */
 			hwctx->forever_mode_detached = true;
@@ -1861,8 +1904,12 @@ stopped:
 						   sizeof(u32), &val);
 	}
 
-	/* Release extra BO refs now that firmware has stopped DMA-ing */
-	ve2_forever_release_bo_refs(nhwctx);
+	/*
+	 * BO refs are NOT released here.  They must stay alive until
+	 * ve2_hwctx_reclaim_detached() has destroyed the partition,
+	 * ensuring no DMA can be in flight when IOMMU mappings are
+	 * torn down.
+	 */
 
 	XDNA_INFO(xdna, "Forever mode stopped for context %s (device released for new contexts)",
 		  hwctx->name);
@@ -1872,23 +1919,30 @@ stopped:
 
 /**
  * ve2_hwctx_reclaim_detached() - Reclaim resources from a detached forever mode context
- * @xdna: Device pointer (client may be freed, so passed explicitly)
+ * @xdna: Device pointer
  * @hwctx: Context to reclaim
  *
  * This function performs full cleanup of a context that was detached due to forever mode.
  * It should only be called after forever mode has been stopped and verified.
  * The caller must hold detached_lock.
+ *
+ * Returns: the zombie client pointer if caller must call
+ *          amdxdna_client_deferred_close() AFTER releasing detached_lock,
+ *          or NULL if no deferred close is needed.
  */
-void ve2_hwctx_reclaim_detached(struct amdxdna_dev *xdna, struct amdxdna_ctx *hwctx)
+struct amdxdna_client *
+ve2_hwctx_reclaim_detached(struct amdxdna_dev *xdna, struct amdxdna_ctx *hwctx)
 {
 	struct amdxdna_ctx_priv *nhwctx = hwctx->priv;
+	struct amdxdna_client *client = hwctx->client;
+	struct amdxdna_client *zombie_client = NULL;
 	struct amdxdna_mgmtctx *mgmtctx;
 	struct amdxdna_sched_job *job;
 	int idx;
 
 	if (!nhwctx) {
 		pr_err("amdxdna: Cannot reclaim context %p: priv is NULL\n", hwctx);
-		return;
+		return NULL;
 	}
 
 	mgmtctx = &xdna->dev_handle->ve2_mgmtctx[nhwctx->start_col];
@@ -1903,6 +1957,25 @@ void ve2_hwctx_reclaim_detached(struct amdxdna_dev *xdna, struct amdxdna_ctx *hw
 	list_del(&hwctx->detached_list_node);
 	hwctx->forever_mode_detached = false;
 
+	/*
+	 * Check if the client is a zombie and whether any other detached
+	 * contexts still reference it.  Must check while holding detached_lock.
+	 */
+	if (client && client->zombie) {
+		struct amdxdna_ctx *other;
+		bool last_detached = true;
+
+		list_for_each_entry(other, &xdna->detached_forever_ctxs,
+				    detached_list_node) {
+			if (other->client == client) {
+				last_detached = false;
+				break;
+			}
+		}
+		if (last_detached)
+			zombie_client = client;
+	}
+
 	/* Clear active_ctx pointer in mgmtctx */
 	mutex_lock(&mgmtctx->ctx_lock);
 	if (mgmtctx->active_ctx == hwctx)
@@ -1910,6 +1983,7 @@ void ve2_hwctx_reclaim_detached(struct amdxdna_dev *xdna, struct amdxdna_ctx *hw
 	mutex_unlock(&mgmtctx->ctx_lock);
 
 	/* Release jobs */
+	del_timer_sync(&nhwctx->event_timer);
 	mutex_lock(&nhwctx->privctx_lock);
 	for (idx = 0; idx < HWCTX_MAX_CMDS; idx++) {
 		job = nhwctx->pending[idx];
@@ -1931,6 +2005,12 @@ void ve2_hwctx_reclaim_detached(struct amdxdna_dev *xdna, struct amdxdna_ctx *hw
 	if (nhwctx->aie_dev)
 		ve2_mgmt_destroy_partition(xdna, hwctx);
 
+	/*
+	 * Release extra BO refs AFTER partition is destroyed so that
+	 * IOMMU mappings remain valid while DMA could be in flight.
+	 */
+	ve2_forever_release_bo_refs(nhwctx);
+
 	/* Free context-specific resources */
 	ve2_free_hsa_queue(xdna, &nhwctx->hwctx_hsa_queue);
 	kfree(nhwctx->hwctx_config);
@@ -1939,6 +2019,12 @@ void ve2_hwctx_reclaim_detached(struct amdxdna_dev *xdna, struct amdxdna_ctx *hw
 	hwctx->priv = NULL;
 
 	XDNA_INFO(xdna, "Detached context %s successfully reclaimed", hwctx->name);
+
+	/* Free the context itself (was skipped in amdxdna_ctx_destroy_rcu) */
+	kfree(hwctx->name);
+	kfree(hwctx);
+
+	return zombie_client;
 }
 
 int ve2_hwctx_query_forever_status(struct amdxdna_dev *xdna, struct amdxdna_ctx *hwctx,
