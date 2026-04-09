@@ -114,6 +114,8 @@ static void amdxdna_aux_remove(struct auxiliary_device *auxdev)
 	/* Force-stop and reclaim any detached forever mode contexts */
 	mutex_lock(&xdna->detached_lock);
 	while (!list_empty(&xdna->detached_forever_ctxs)) {
+		struct amdxdna_client *zombie;
+
 		ctx = list_first_entry(&xdna->detached_forever_ctxs,
 				       struct amdxdna_ctx, detached_list_node);
 
@@ -124,12 +126,15 @@ static void amdxdna_aux_remove(struct auxiliary_device *auxdev)
 		/* Stop forever mode - this polls until firmware stops */
 		ve2_hwctx_forever_stop(xdna, ctx);
 
-		/* Reclaim all resources (removes from list) */
-		ve2_hwctx_reclaim_detached(xdna, ctx);
+		/* Reclaim all resources (removes from list, frees ctx) */
+		zombie = ve2_hwctx_reclaim_detached(xdna, ctx);
 
-		/* Free the context structure itself */
-		kfree(ctx->name);
-		kfree(ctx);
+		/* Deferred client cleanup if this was the last detached ctx */
+		if (zombie) {
+			mutex_unlock(&xdna->detached_lock);
+			amdxdna_client_deferred_close(zombie);
+			mutex_lock(&xdna->detached_lock);
+		}
 	}
 	mutex_unlock(&xdna->detached_lock);
 	mutex_destroy(&xdna->detached_lock);
