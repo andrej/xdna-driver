@@ -31,6 +31,16 @@ static int amdxdna_drm_open(struct drm_device *ddev, struct drm_file *filp)
 	client->uid = current_euid();
 	client->xdna = xdna;
 
+#ifdef AMDXDNA_OF
+	/*
+	 * VE2 OF platform uses CMA buffers with direct physical addresses.
+	 * SVA binding is not needed and is actively harmful: the SMMU would
+	 * walk the process's page tables for PASID-tagged transactions.
+	 * After the process exits (zombie client), those page-table walks
+	 * corrupt kernel memory.
+	 */
+	goto skip_sva_bind;
+#endif
 #ifdef AMDXDNA_DEVEL
 	if (iommu_mode != AMDXDNA_IOMMU_PASID)
 		goto skip_sva_bind;
@@ -49,7 +59,7 @@ static int amdxdna_drm_open(struct drm_device *ddev, struct drm_file *filp)
 			goto unbind_sva;
 		}
 	}
-#ifdef AMDXDNA_DEVEL
+#if defined(AMDXDNA_DEVEL) || defined(AMDXDNA_OF)
 skip_sva_bind:
 #endif
 	init_srcu_struct(&client->ctx_srcu);
@@ -83,10 +93,44 @@ static void amdxdna_drm_close(struct drm_device *ddev, struct drm_file *filp)
 {
 	struct amdxdna_client *client = filp->driver_priv;
 	struct amdxdna_dev *xdna = to_xdna_dev(ddev);
+	bool has_detached = false;
 
 	XDNA_DBG(xdna, "Closing PID %d", client->pid);
 
 	xa_destroy(&client->ctx_xa);
+
+	/*
+	 * Check if any detached forever-mode contexts belong to this client.
+	 * If so, the client must survive (zombie) because:
+	 *   1. ctx->client pointers would dangle after kfree
+	 *   2. cleanup_srcu_struct() interacts with core RCU machinery;
+	 *      freeing the embedded srcu_struct while grace periods are
+	 *      pending corrupts rcu_node data → crash in rcu_gp_kthread
+	 *   3. BO pages must stay pinned (dev_heap ref keeps CMA alive)
+	 *   4. SVA binding (if active) must remain for firmware DMA
+	 */
+	mutex_lock(&xdna->detached_lock);
+	{
+		struct amdxdna_ctx *ctx;
+
+		list_for_each_entry(ctx, &xdna->detached_forever_ctxs,
+				    detached_list_node) {
+			if (ctx->client == client) {
+				has_detached = true;
+				break;
+			}
+		}
+	}
+	mutex_unlock(&xdna->detached_lock);
+
+	if (has_detached) {
+		client->zombie = true;
+		XDNA_INFO(xdna,
+			  "PID %d has detached forever context(s) — deferring client cleanup",
+			  client->pid);
+		return;
+	}
+
 	cleanup_srcu_struct(&client->ctx_srcu);
 	if (client->dev_heap)
 		drm_gem_object_put(to_gobj(client->dev_heap));
@@ -103,6 +147,37 @@ skip_sva_unbind:
 #endif
 
 	XDNA_DBG(xdna, "PID %d closed", client->pid);
+	kfree(client);
+}
+
+/*
+ * Deferred client cleanup for zombie clients.
+ * Called from ve2_hwctx_reclaim_detached() when the last detached
+ * forever-mode context for this client is reclaimed.
+ * Caller must NOT hold detached_lock.
+ */
+void amdxdna_client_deferred_close(struct amdxdna_client *client)
+{
+	struct amdxdna_dev *xdna = client->xdna;
+
+	XDNA_INFO(xdna, "Deferred cleanup for zombie client PID %d", client->pid);
+
+	cleanup_srcu_struct(&client->ctx_srcu);
+	if (client->dev_heap)
+		drm_gem_object_put(to_gobj(client->dev_heap));
+	mutex_destroy(&client->mm_lock);
+
+#ifdef AMDXDNA_DEVEL
+	if (iommu_mode != AMDXDNA_IOMMU_PASID)
+		goto skip_sva_unbind_deferred;
+#endif
+	if (!IS_ERR_OR_NULL(client->sva))
+		iommu_sva_unbind_device(client->sva);
+#ifdef AMDXDNA_DEVEL
+skip_sva_unbind_deferred:
+#endif
+
+	XDNA_INFO(xdna, "Zombie client PID %d fully cleaned up", client->pid);
 	kfree(client);
 }
 

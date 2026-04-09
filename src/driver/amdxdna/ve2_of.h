@@ -156,7 +156,8 @@ int ve2_hwctx_config_forever_mode(struct amdxdna_ctx *hwctx, u32 enabled);
 int ve2_hwctx_forever_stop(struct amdxdna_dev *xdna, struct amdxdna_ctx *hwctx);
 int ve2_hwctx_query_forever_status(struct amdxdna_dev *xdna, struct amdxdna_ctx *hwctx,
 				    struct amdxdna_hwctx_forever_status *status);
-void ve2_hwctx_reclaim_detached(struct amdxdna_dev *xdna, struct amdxdna_ctx *hwctx);
+struct amdxdna_client *
+ve2_hwctx_reclaim_detached(struct amdxdna_dev *xdna, struct amdxdna_ctx *hwctx);
 void ve2_free_firmware_slots(struct amdxdna_dev_hdl *xdna_hdl, u32 max_cols);
 
 int ve2_cmd_submit(struct amdxdna_ctx *hwctx, struct amdxdna_sched_job *job, u32 *syncobj_hdls,

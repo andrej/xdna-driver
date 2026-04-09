@@ -163,6 +163,15 @@ struct amdxdna_dev {
 	struct mutex			detached_lock;
 	u32				next_detached_id;
 
+	/* Ping-pong pre-configuration for forever mode contexts.
+	 * Written via sysfs BEFORE app starts.  Applied to handshake
+	 * memory during ve2_hwctx_init() so firmware sees pp_enabled=1
+	 * on its first read (it caches the value once at loop entry). */
+	bool				pp_preconfig_enabled;
+	u32				pp_preconfig_arg_index;
+	u32				pp_preconfig_buf_b_addr;
+	u32				pp_preconfig_flag_ddr_addr;
+
 	u64				runtime_dev_mem_base;
 };
 
@@ -211,6 +220,16 @@ struct amdxdna_client {
 	int				pasid;
 
 	struct amdxdna_stats		stats;
+
+	/*
+	 * Forever-mode zombie client.
+	 * When a forever-mode context is detached during client close,
+	 * the client must survive until all detached contexts are reclaimed.
+	 * The SRCU struct, SVA binding, and dev_heap BO must remain valid
+	 * because the firmware continues DMA-ing through the original
+	 * IOMMU mappings and the GEM BO pages must stay pinned.
+	 */
+	bool				zombie;
 };
 
 #define amdxdna_for_each_ctx(client, ctx_id, entry)		\
@@ -220,6 +239,7 @@ struct amdxdna_client {
 
 void amdxdna_stats_start(struct amdxdna_client *client);
 void amdxdna_stats_account(struct amdxdna_client *client);
+void amdxdna_client_deferred_close(struct amdxdna_client *client);
 int amdxdna_drm_copy_array_to_user(struct amdxdna_drm_get_array *tgt,
 				   void *array, size_t element_size, size_t num_element);
 int amdxdna_drm_copy_array_from_user(struct amdxdna_drm_get_array *src,
