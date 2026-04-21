@@ -529,6 +529,21 @@ static int ve2_create_host_queue(struct amdxdna_dev *xdna, struct amdxdna_ctx *h
 		}
 	}
 
+	/* Try any initialized CMA region before system default */
+	if (!queue->hsa_queue_p) {
+		for (r = 0; r < MAX_MEM_REGIONS; r++) {
+			alloc_dev = xdna->cma_region_devs[r];
+			if (alloc_dev && !(hwctx->priv->mem_bitmap & (1U << r))) {
+				queue->hsa_queue_p = dma_alloc_coherent(alloc_dev, alloc_size,
+									&dma_handle, GFP_KERNEL);
+				if (queue->hsa_queue_p) {
+					queue->alloc_dev = alloc_dev;
+					break;
+				}
+			}
+		}
+	}
+
 	/* If no allocation succeeded, use the default device */
 	if (!queue->hsa_queue_p) {
 		queue->hsa_queue_p = dma_alloc_coherent(xdna->ddev.dev,
@@ -1559,26 +1574,22 @@ void ve2_hwctx_fini(struct amdxdna_ctx *hwctx)
 #endif
 	}
 
-	/*
-	 * Clear active_ctx FIRST to prevent IRQ handler from queueing new work,
-	 * remove all FIFO entries for this context to prevent use-after-free,
-	 * then cancel any pending work to ensure no work is accessing this context
-	 */
 	mgmtctx = &xdna->dev_handle->ve2_mgmtctx[nhwctx->start_col];
-	mutex_lock(&mgmtctx->ctx_lock);
-	if (mgmtctx->active_ctx == hwctx)
-		mgmtctx->active_ctx = NULL;
-	/* Remove all FIFO entries for this context before freeing it */
-	ve2_fifo_remove_ctx(mgmtctx, hwctx);
-	mutex_unlock(&mgmtctx->ctx_lock);
-
-	/* Now cancel any pending work - it will see active_ctx as NULL and bail out */
-	if (mgmtctx->mgmtctx_workq)
-		cancel_work_sync(&mgmtctx->sched_work);
 
 	/*
-	 * Check if forever mode is currently running.
-	 * If so, 'detach' the context -- it will be owned by the kernel, not the user application.
+	 * Check if forever mode is currently running BEFORE clearing active_ctx.
+	 * If so, 'detach' the context -- it will be owned by the kernel, not
+	 * the user application.
+	 *
+	 * CRITICAL: We must NOT clear mgmtctx->active_ctx for forever-mode
+	 * contexts.  The firmware is still running, generating interrupts and
+	 * potentially hitting AIE errors.  If active_ctx is NULL:
+	 *   - ve2_irq_handler silently drops ALL hardware interrupts
+	 *   - ve2_aie_error_cb cannot flag errors on the context
+	 *   - ve2_scheduler_work bails without processing anything
+	 * This severs the error-handling chain, making transient AIE errors
+	 * (which the driver would normally recover from) fatal -- the firmware
+	 * crashes and forever_iteration stops incrementing.
 	 *
 	 * We detach when forever mode is enabled AND BOs have been pinned.
 	 * We don't require forever_iteration > 0 because there's a race:
@@ -1593,36 +1604,58 @@ void ve2_hwctx_fini(struct amdxdna_ctx *hwctx)
 						  offsetof(struct handshake, forever_iteration),
 						  sizeof(u32), &forever_iter);
 
-		{
-			XDNA_INFO(xdna,
-				  "Forever mode active (iter=%u, pinned_bos=%u), detaching context %s instead of destroying",
-				  forever_iter, nhwctx->forever_bo_ref_cnt, hwctx->name);
+		XDNA_INFO(xdna,
+			  "Forever mode active (iter=%u, pinned_bos=%u), detaching context %s instead of destroying",
+			  forever_iter, nhwctx->forever_bo_ref_cnt, hwctx->name);
 
-			/* Mark as detached and add to global tracking list */
-			hwctx->forever_mode_detached = true;
-			mutex_lock(&xdna->detached_lock);
-			hwctx->id = xdna->next_detached_id++;
-			list_add_tail(&hwctx->detached_list_node, &xdna->detached_forever_ctxs);
-			mutex_unlock(&xdna->detached_lock);
+		/* Mark as detached and add to global tracking list */
+		hwctx->forever_mode_detached = true;
+		mutex_lock(&xdna->detached_lock);
+		hwctx->id = xdna->next_detached_id++;
+		list_add_tail(&hwctx->detached_list_node, &xdna->detached_forever_ctxs);
+		mutex_unlock(&xdna->detached_lock);
 
-			/* Expose pinned BO addresses via sysfs */
-			amdxdna_sysfs_create_forever_ctx(xdna, hwctx);
+		/* Clean up consumed FIFO entries (should already be empty) */
+		mutex_lock(&mgmtctx->ctx_lock);
+		ve2_fifo_remove_ctx(mgmtctx, hwctx);
+		mutex_unlock(&mgmtctx->ctx_lock);
 
-			XDNA_INFO(xdna,
-				  "Context %s detached as detached_id=%u. Memory kept alive for firmware. "
-				  "Use sysfs forever_mode_stop to reclaim resources.",
-				  hwctx->name, hwctx->id);
+		/* Expose pinned BO addresses via sysfs */
+		amdxdna_sysfs_create_forever_ctx(xdna, hwctx);
 
-			/*
-			 * DON'T free:
-			 * - HSA queue (firmware reads/writes it)
-			 * - BOs (extra refs taken at submit time)
-			 * - Partition (firmware uses handshake memory)
-			 * - Context structures (needed for later reclaim)
-			 */
-			return;  /* Exit early without cleanup */
-		}
+		XDNA_INFO(xdna,
+			  "Context %s detached as detached_id=%u. Memory kept alive for firmware. "
+			  "Use sysfs forever_mode_stop to reclaim resources.",
+			  hwctx->name, hwctx->id);
+
+		/*
+		 * DON'T free or disconnect:
+		 * - HSA queue (firmware reads/writes it)
+		 * - BOs (extra refs taken at submit time)
+		 * - Partition (firmware uses handshake memory)
+		 * - Context structures (needed for later reclaim)
+		 * - mgmtctx->active_ctx (needed for IRQ delivery
+		 *   and AIE error handling while firmware runs)
+		 */
+		return;  /* Exit early without cleanup */
 	}
+
+	/*
+	 * Non-forever path: Clear active_ctx FIRST to prevent IRQ handler from
+	 * queueing new work, remove all FIFO entries for this context to prevent
+	 * use-after-free, then cancel any pending work to ensure no work is
+	 * accessing this context.
+	 */
+	mutex_lock(&mgmtctx->ctx_lock);
+	if (mgmtctx->active_ctx == hwctx)
+		mgmtctx->active_ctx = NULL;
+	/* Remove all FIFO entries for this context before freeing it */
+	ve2_fifo_remove_ctx(mgmtctx, hwctx);
+	mutex_unlock(&mgmtctx->ctx_lock);
+
+	/* Now cancel any pending work - it will see active_ctx as NULL and bail out */
+	if (mgmtctx->mgmtctx_workq)
+		cancel_work_sync(&mgmtctx->sched_work);
 
 	/* Release forever mode BO refs if they were taken */
 	ve2_forever_release_bo_refs(nhwctx);
@@ -1910,6 +1943,10 @@ ve2_hwctx_reclaim_detached(struct amdxdna_dev *xdna, struct amdxdna_ctx *hwctx)
 	if (mgmtctx->active_ctx == hwctx)
 		mgmtctx->active_ctx = NULL;
 	mutex_unlock(&mgmtctx->ctx_lock);
+
+	/* Cancel any pending scheduler work now that active_ctx is cleared */
+	if (mgmtctx->mgmtctx_workq)
+		cancel_work_sync(&mgmtctx->sched_work);
 
 	/* Release jobs */
 	del_timer_sync(&nhwctx->event_timer);

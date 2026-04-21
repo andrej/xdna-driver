@@ -306,7 +306,9 @@ static bool get_cacheable_flag(u64 flags)
  *
  * Attempts allocation in order:
  * 1. Requested region/s (extracted from flags)
- * 2. System default CMA (fallback_dev)
+ * 2. Any initialized CMA region (ensures BOs land in reserved-memory pools
+ *    that are accessible to all processors, e.g. 32-bit RPU cores)
+ * 3. System default CMA (fallback_dev)
  *
  * Return: dma_buf pointer on success, ERR_PTR on failure
  */
@@ -326,6 +328,21 @@ struct dma_buf *amdxdna_get_cma_buf_with_fallback(struct device *const *region_d
 	/* Try to allocate from the requested region(s) in bitmap order (bit 0, then 1, ...). */
 	for (i = 0; i < max_regions; i++) {
 		if ((mem_bitmap & (1U << i)) && region_devs[i]) {
+			dma_buf = amdxdna_get_cma_buf(region_devs[i], size, cacheable);
+			if (!IS_ERR(dma_buf))
+				return dma_buf;
+		}
+	}
+
+	/*
+	 * No explicit region requested (mem_bitmap == 0) or requested regions
+	 * failed.  Try all initialized CMA region devices before falling back
+	 * to system default CMA.  This ensures allocations land in the
+	 * reserved-memory pool (below 4 GB) so 32-bit RPU cores can access
+	 * the buffers.
+	 */
+	for (i = 0; i < max_regions; i++) {
+		if (region_devs[i] && !(mem_bitmap & (1U << i))) {
 			dma_buf = amdxdna_get_cma_buf(region_devs[i], size, cacheable);
 			if (!IS_ERR(dma_buf))
 				return dma_buf;
