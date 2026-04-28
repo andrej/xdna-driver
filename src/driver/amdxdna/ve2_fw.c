@@ -15,7 +15,23 @@ int ve2_store_firmware_version(struct ve2_firmware_version *c_version, struct de
 	struct ve2_firmware_version *version;
 	int ret = 0;
 
-	version = kzalloc(sizeof(*version), GFP_KERNEL);
+	/*
+	 * The CERT firmware lays out the version block as VE2_CERT_VERSION_SIZE
+	 * bytes (0x40), and ve2_partition_read() will write exactly that many
+	 * bytes into the supplied buffer.  struct ve2_firmware_version itself
+	 * is only 54 bytes, so allocating sizeof(*version) and asking the
+	 * partition read to write VE2_CERT_VERSION_SIZE bytes overflows the
+	 * kmalloc allocation by 10 bytes -- SLUB / KASAN flag it as
+	 *   "kmalloc Redzone overwritten ... @offset=3958. First byte 0"
+	 *   in ve2_store_firmware_version+0x3c/0x190 [amdxdna]
+	 * during module load, and on non-KASAN kernels it silently corrupts
+	 * the trailing 10 bytes of the kmalloc-64 bucket.
+	 *
+	 * Allocate a buffer that matches the on-device layout size and only
+	 * pull the fields we care about out of it.
+	 */
+	BUILD_BUG_ON(sizeof(*version) > VE2_CERT_VERSION_SIZE);
+	version = kzalloc(VE2_CERT_VERSION_SIZE, GFP_KERNEL);
 	if (!version)
 		return -ENOMEM;
 
