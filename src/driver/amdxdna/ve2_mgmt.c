@@ -366,10 +366,15 @@ void ve2_mgmt_handshake_init(struct amdxdna_dev *xdna,
 		nhwctx->args->init_opts = (AIE_PART_INIT_OPT_DEFAULT | AIE_PART_INIT_OPT_HANDSHAKE |
 				AIE_PART_INIT_OPT_DIS_TLAST_ERROR) & ~AIE_PART_INIT_OPT_UC_ENB_MEM_PRIV;
 
-	else 
-		nhwctx->args->init_opts = (AIE_PART_INIT_OPT_DEFAULT | AIE_PART_INIT_OPT_ERR_SHIM_INIT |
-                                  AIE_PART_INIT_OPT_HANDSHAKE | AIE_PART_INIT_OPT_DIS_TLAST_ERROR)
-                                  & ~AIE_PART_INIT_OPT_UC_ENB_MEM_PRIV & ~AIE_PART_INIT_ERROR_HANDLING;
+	else
+		/*
+		 * Perf mode (off by default). AIE_PART_INIT_OPT_ERR_SHIM_INIT and
+		 * AIE_PART_INIT_ERROR_HANDLING do not exist in the 2025.2 xlnx AIE
+		 * partition uAPI, so use the same supported flag set as the standard
+		 * path to keep the module buildable on the vai_6.2 / 6.12 kernel.
+		 */
+		nhwctx->args->init_opts = (AIE_PART_INIT_OPT_DEFAULT | AIE_PART_INIT_OPT_HANDSHAKE |
+				AIE_PART_INIT_OPT_DIS_TLAST_ERROR) & ~AIE_PART_INIT_OPT_UC_ENB_MEM_PRIV;
 
 	XDNA_DBG(xdna, "Handshake init hwctx : %p\n", hwctx);
 	XDNA_DBG(xdna,
